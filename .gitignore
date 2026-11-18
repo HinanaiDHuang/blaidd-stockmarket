@@ -1,0 +1,24 @@
+# ---- secrets ----
+secrets.json
+*.key
+*.pem
+
+# ---- python ----
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# ---- test artifacts ----
+tests/_*/
+tests/g_*.db
+tests/*.err
+tests/*.out
+
+# ---- runtime data ----
+py/stockmarket/data/
+py/stockmarket/g_*.db
+py/stockmarket/__pycache__/
+
+# ---- local helper ----
+_commitmsg.txt

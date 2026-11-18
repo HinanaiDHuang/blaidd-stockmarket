@@ -1,0 +1,9 @@
+# 默认：文本文件，入库统一 LF
+* text=auto
+
+# 炒股.lua 是 Windows 下的 GBK + CRLF 文件，必须原样存储
+# （-text 禁用所有换行转换，binary 额外禁用 diff/merge 的文本处理）
+plugin/*.lua -text binary
+
+# 二进制产物
+*.db binary

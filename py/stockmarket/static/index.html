@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0d1117">
+<title>布莱泽模拟炒股</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ctext y='26' font-size='26'%3E%F0%9F%93%88%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/style.css?v=20261118d">
+</head>
+<body>
+<div id="app">
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">📈</span>
+      <span class="name">布莱泽模拟炒股</span>
+      <button class="mini-btn brand-btn chg-btn" id="btnChg" type="button" title="最近改动">📣<i class="chg-dot" id="chgDot" hidden></i></button>
+      <button class="mini-btn brand-btn" id="btnHelp" type="button">怎么玩</button>
+      <button class="mini-btn brand-btn" id="btnLogout" type="button">切换账号</button>
+    </div>
+    <div class="wallet" id="wallet">
+      <div class="w-item"><span class="w-label">净值</span><span class="w-val" id="wEquity">--</span></div>
+      <div class="w-item"><span class="w-label">可用</span><span class="w-val" id="wCash">--</span></div>
+      <div class="w-item"><span class="w-label">欠款</span><span class="w-val" id="wLoan">--</span></div>
+      <div class="w-item"><span class="w-label">浮动</span><span class="w-val" id="wUnreal">--</span></div>
+    </div>
+  </header>
+
+  <div class="bankrupt" id="bankruptBar" hidden>
+    <div class="bk-text">
+      <b>⚠️ 你已破产，暂时不能交易。</b><br />
+      打工上限 / 签到奖励翻倍、贷款免息；攒够收入还能申请<b>债务重整</b>，
+      欠款一笔勾销后重新开户。<br />
+      <span class="bk-sub">（资不抵债才算破产，净值一回正就自动恢复交易）</span>
+    </div>
+    <button class="mini-btn" data-act="job">立刻打工</button>
+  </div>
+
+  <div class="market-bar" id="marketBar" hidden></div>
+
+  <nav class="tabs">
+    <button class="tab active" data-tab="market">行情</button>
+    <button class="tab" data-tab="positions">交易</button>
+    <button class="tab" data-tab="news">资讯</button>
+    <button class="tab" data-tab="rank">排行</button>
+    <button class="tab" data-tab="me">我的</button>
+  </nav>
+
+<section class="pane active" id="pane-market">
+    <div class="chart-card">
+      <div class="chart-head">
+        <div class="chart-id">
+          <div class="c-name" id="cName">--</div>
+          <div class="c-sub" id="cSub">--</div>
+        </div>
+        <div class="c-price">
+          <div class="c-last" id="cLast">--</div>
+          <div class="c-chg" id="cChg">--</div>
+        </div>
+      </div>
+      <div class="chart-wrap">
+        <canvas id="chart"></canvas>
+        <div class="cross-info" id="crossInfo" hidden></div>
+      </div>
+      <div class="chart-foot">
+        <span id="ohlc">开 --　高 --　低 --　收 --</span>
+        <button class="mini-btn" id="btnLatest">回到最新</button>
+      </div>
+    </div>
+
+    <div class="order-card" id="orderCard">
+      <div class="ord-title">
+        <span>下单</span>
+        <span class="ord-cur" id="ordCur">现价 --</span>
+      </div>
+
+      <div class="seg">
+        <button class="seg-btn long active" data-side="long">做多 · 买入</button>
+        <button class="seg-btn short" data-side="short">做空 · 卖出</button>
+      </div>
+
+      <div class="ord-field">
+        <label for="qtyInput">数量</label>
+        <input type="number" id="qtyInput" inputmode="numeric" placeholder="股数，如 100" min="1" step="100">
+        <div class="quick">
+          <button class="mini-btn" data-qty="all">全部</button>
+          <button class="mini-btn" data-qty="100">100</button>
+          <button class="mini-btn" data-qty="1000">1000</button>
+        </div>
+      </div>
+
+      <div class="ord-field">
+        <label for="levRange">杠杆</label>
+        <input type="range" id="levRange" min="1" max="20" value="1">
+        <span class="lev-val" id="levVal">1x</span>
+      </div>
+
+      <div class="calc" id="calc">预计保证金 --　手续费 --</div>
+
+      <div class="ord-btns">
+        <button class="big-btn long" id="btnLong">买入开多</button>
+        <button class="big-btn short" id="btnShort">卖出开空</button>
+      </div>
+
+      <div class="hint">做空同样占用保证金，杠杆越高爆得越快。</div>
+
+      <div class="ord-extra">
+        <button class="ghost-btn" id="btnSabotage" hidden>🗡 商业战</button>
+        <span class="ord-extra-hint" id="sabotageHint">对别人的公司下手（有失败率，会被报复）</span>
+      </div>
+    </div>
+
+    <div class="list-card">
+      <div class="list-title">全部股票（点击切换）</div>
+      <div class="search-row">
+        <input type="search" id="stockSearch" autocomplete="off"
+               placeholder="搜公司名 / 代码 / 行业，比如「电子」「600」「隔壁老王」">
+        <button class="mini-btn" id="btnClearSearch">清空</button>
+      </div>
+      <div class="stock-list" id="stockList"></div>
+    </div>
+  </section>
+
+  <section class="pane" id="pane-positions">
+    <div class="list-card">
+      <div class="list-title">我的持仓</div>
+      <div class="pos-list" id="posList"></div>
+    </div>
+
+    <div class="list-card">
+      <div class="list-title">条件单<span class="list-sub">到价自动止损 / 止盈 / 限价成交</span></div>
+      <div class="cond-add">
+        <div class="cond-row">
+          <select id="condKind">
+            <option value="stop_loss">止损 · 亏到就跑</option>
+            <option value="take_profit">止盈 · 赚了就跑</option>
+            <option value="limit">限价 · 到价自动开仓</option>
+          </select>
+          <select id="condSide">
+            <option value="long">多</option>
+            <option value="short">空</option>
+          </select>
+        </div>
+        <div class="cond-row">
+          <input type="number" id="condTrigger" inputmode="decimal" placeholder="触发价" step="0.001">
+          <input type="number" id="condQty" inputmode="numeric" placeholder="数量（限价必填）" min="1" step="100">
+          <button class="mini-btn primary" id="btnCondAdd">挂单</button>
+        </div>
+        <div class="hint" id="condHint">止损/止盈针对当前选中的股票，数量留空表示全仓平掉。</div>
+      </div>
+      <div class="cond-list" id="condList"></div>
+    </div>
+
+    <div class="list-card">
+      <div class="list-title">交易流水</div>
+      <div class="trade-list" id="tradeList"></div>
+    </div>
+  </section>
+
+  <section class="pane" id="pane-news">
+    <div class="list-card">
+      <div class="list-title">财经快讯</div>
+      <div class="peek-box">
+        <button class="big-btn peek" id="btnPeek">🔮 买内幕消息</button>
+        <div class="peek-hint" id="peekHint">花钱买一条坊间传闻，提前知道下一条快讯的标的和方向（传闻只有五成准，别全信）</div>
+      </div>
+      <div class="news-list" id="newsList"></div>
+    </div>
+  </section>
+
+    <section class="pane" id="pane-rank">
+    <div class="subtabs">
+      <button class="subtab active" data-board="rich">富豪榜</button>
+      <button class="subtab" data-board="profit">盈亏榜</button>
+      <button class="subtab" data-board="hot">涨幅榜</button>
+      <button class="subtab" data-board="limit">涨停榜</button>
+      <button class="subtab" data-board="lose">亏损榜</button>
+      <button class="subtab" data-board="rob">打土豪</button>
+      <button class="subtab" data-board="lux">挥霍榜</button>
+    </div>
+    <div class="list-card">
+      <div class="list-title" id="boardTitle">群内富豪榜</div>
+      <div class="rank-list" id="rankList"></div>
+    </div>
+  </section>
+
+  <section class="pane" id="pane-me">
+    <div class="list-card me-hero">
+      <div class="mh-row">
+        <span class="tier-badge" id="tierBadge">普通股民</span>
+        <span class="mh-hint" id="tierHint"></span>
+      </div>
+      <div class="mh-perk" id="tierPerk"></div>
+      <div class="mh-next" id="tierNext" hidden>
+        <div class="mh-next-txt"><span id="tierNextTxt"></span><b id="tierNextGap"></b></div>
+        <div class="mh-bar"><div class="mh-bar-in" id="tierBar"></div></div>
+      </div>
+    </div>
+
+    <div class="list-card onboard" id="onboardCard" hidden>
+      <div class="list-title" id="onboardTitle">新手引导<span class="list-sub" id="onboardSub"></span></div>
+      <div class="ob-list" id="obList"></div>
+    </div>
+
+    <div id="toolHost"></div>
+
+    <div class="list-card" id="recoveryCard" hidden>
+      <div class="list-title">破产纥困<span class="list-sub">翻身计划</span></div>
+      <div class="rec-top">
+        <div><span class="rec-k">累计收入</span><span class="rec-v" id="recEarn">0</span></div>
+        <div><span class="rec-k">剩余欠款</span><span class="rec-v down" id="recLoan">0</span></div>
+      </div>
+      <div class="rec-bar"><div class="rec-bar-in" id="recBar"></div></div>
+      <div class="rec-next" id="recNext"></div>
+      <div class="rec-tiers" id="recTiers"></div>
+    </div>
+  </section>
+
+  <div id="panelHost">
+    <div class="acc-body" id="pnl-checkin" hidden>
+      <div class="list-card">
+        <div class="list-title">每日签到</div>
+
+    <div class="checkin-box" id="checkinBox">
+      <div class="ci-top"><span id="ciStreak">连签 0 天</span><span id="ciBest">最长 0 天</span></div>
+      <div class="ci-bar" id="ciBar"><i></i></div>
+      <div class="ci-tip" id="ciTip">每天来签一次，连签满 7 天有大赏</div>
+      <button class="big-btn" id="btnCheckin">立即签到</button>
+    </div>
+      </div>
+    </div>
+    <div class="acc-body" id="pnl-lottery" hidden>
+      <div class="list-card">
+        <div class="list-title">每日抽奖</div>
+
+    <div class="fun-box">
+      <button class="big-btn fun" id="btnLottery">🎰 抽一个</button>
+      <div class="fun-hint" id="lotteryHint">奖池里有现金，也有免手续费券、免息券、打工双倍券。</div>
+    </div>
+      </div>
+    </div>
+    <div class="acc-body" id="pnl-quest" hidden>
+      <div class="list-card">
+        <div class="list-title">每日任务</div>
+
+    <div class="quest-list" id="questList"><div class="empty">加载中…</div></div>
+      </div>
+    </div>
+    <div class="acc-body" id="pnl-daily" hidden>
+      <div class="list-card">
+        <div class="list-title">今日收盘复盘</div>
+
+    <button class="big-btn ghost" id="btnDaily">📅 今日收盘复盘</button>
+    <div class="daily-box" id="dailyBox" hidden></div>
+      </div>
+    </div>
+    <div class="acc-body" id="pnl-job" hidden>
+      <div class="list-card">
+        <div class="list-title">去别人公司打工</div>
+
+    <button class="big-btn job" id="btnJob">去别人公司打工</button>
+    <div class="hint" id="jobHint">打工只是应急兜底：工资按雇主身家的 0.4% 结算，每天上限 2000 元,
+      冷却 10~25 分钟（随职级变长）。想赚大钱只能去炒股。</div>
+      </div>
+    </div>
+    <div class="acc-body" id="pnl-loan" hidden>
+      <div class="list-card">
+        <div class="list-title">贷款 / 还款</div>
+
+    <div class="ord-field">
+      <label for="loanInput">金额</label>
+      <input type="number" id="loanInput" inputmode="numeric" placeholder="10000">
+    </div>
+    <div class="ord-btns">
+      <button class="big-btn long" id="btnBorrow">贷款</button>
+      <button class="big-btn ghost" id="btnRepay">还款</button>
+    </div>
+    <div class="calc" id="loanInfo">初始资金固定，日息按时间计提。</div>
+      </div>
+    </div>
+    <div class="acc-body" id="pnl-dividend" hidden>
+      <div class="list-card">
+        <div class="list-title">全民分红</div>
+
+    <div class="ty-box" id="dividendBox"><div class="empty">加载中…</div></div>
+    <button class="big-btn" id="btnClaimDividend">🪙 领取分红</button>
+      </div>
+    </div>
+    <div class="acc-body" id="pnl-wealth" hidden>
+      <div class="list-card">
+        <div class="list-title">财富分布</div>
+
+    <div class="ty-box" id="wealthBox"><div class="empty">加载中…</div></div>
+      </div>
+    </div>
+    <div class="acc-body" id="pnl-vote" hidden>
+      <div class="list-card">
+        <div class="list-title">人气投票</div>
+
+    <div class="vote-add">
+      <select id="voteCid"></select>
+      <button class="mini-btn primary" id="btnVote">投一票</button>
+    </div>
+    <div class="vote-list" id="voteList"></div>
+      </div>
+    </div>
+    <div class="acc-body" id="pnl-guess" hidden>
+      <div class="list-card">
+        <div class="list-title">涨停竞猜</div>
+
+    <div class="vote-add">
+      <select id="guessCid"></select>
+      <button class="mini-btn primary" id="btnGuess">押这一只</button>
+    </div>
+    <div class="fun-hint" id="guessInfo"></div>
+      </div>
+    </div>
+    <div class="acc-body" id="pnl-rob" hidden>
+      <div class="list-card">
+        <div class="list-title">打土豪</div>
+
+    <div class="ty-box" id="robBox"><div class="empty">加载中…</div></div>
+      </div>
+    </div>
+    <div class="acc-body" id="pnl-lux" hidden>
+      <div class="list-card">
+        <div class="list-title">挥霍消费</div>
+
+    <div class="ty-box" id="luxBox"><div class="empty">加载中…</div></div>
+      </div>
+    </div>
+    <div class="acc-body" id="pnl-myco" hidden>
+      <div class="list-card">
+        <div class="list-title">我的公司</div>
+
+    <div class="myco" id="myCoBox"><div class="empty">你还没有上市公司</div></div>
+      </div>
+    </div>
+    <div class="acc-body" id="pnl-remind" hidden>
+      <div class="list-card">
+        <div class="list-title">价格提醒</div>
+
+    <div class="rem-add">
+      <select id="remCid"></select>
+      <select id="remKind">
+        <option value="above">涨到</option>
+        <option value="below">跌到</option>
+      </select>
+      <input type="number" id="remPrice" inputmode="decimal" placeholder="价格" step="0.01">
+      <button class="mini-btn" id="btnRemAdd">加提醒</button>
+    </div>
+    <div class="rem-list" id="remList"></div>
+      </div>
+    </div>
+    <div class="acc-body" id="pnl-ledger" hidden>
+      <div class="list-card">
+        <div class="list-title">账户流水</div>
+
+    <div class="ledger-list" id="ledgerList"></div>
+      </div>
+    </div>
+    <div class="acc-body" id="pnl-ach" hidden>
+      <div class="list-card">
+        <div class="list-title">成就墙</div>
+
+    <div class="ach-grid" id="achGrid"></div>
+      </div>
+    </div>
+    <div class="acc-body" id="pnl-coupon" hidden>
+      <div class="list-card">
+        <div class="list-title">我的道具</div>
+
+    <div class="coupon-list" id="couponList"><div class="empty">还没有道具</div></div>
+      </div>
+    </div>
+    <div class="acc-body" id="pnl-pwd" hidden>
+      <div class="list-card">
+        <div class="list-title">登录口令</div>
+
+    <div class="hint">设一个固定口令，以后不用每次找布莱泽领一次性口令。
+      口令在服务器上只存散列，谁都看不到原文。</div>
+    <div class="ord-field">
+      <label for="pwdInput">新口令</label>
+      <input type="text" id="pwdInput" autocomplete="new-password" placeholder="4~32 位">
+    </div>
+    <button class="big-btn ghost" id="btnSetPwd">设置口令</button>
+    <div class="calc" id="pwdInfo">当前：未设置（群里的临时口令 10 分钟有效、只能用一次）</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal" id="chgModal" hidden>
+    <div class="modal-card">
+      <div class="modal-head">
+        <span>📣 最近改动</span>
+        <button class="mini-btn" id="btnChgClose" type="button">关闭</button>
+      </div>
+      <div class="modal-body" id="chgBody"><div class="empty">加载中…</div></div>
+    </div>
+  </div>
+
+  <div class="modal" id="helpModal" hidden>
+    <div class="modal-card">
+      <div class="modal-head">
+        <span>📖 布莱泽模拟炒股 · 怎么玩</span>
+        <button class="mini-btn" id="btnHelpClose" type="button">关闭</button>
+      </div>
+      <div class="modal-body" id="helpBody"></div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" hidden></div>
+</div>
+<script src="/static/app.js?v=20261118d"></script>
+</body>
+</html>
