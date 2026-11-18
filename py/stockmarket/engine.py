@@ -210,6 +210,18 @@ class Engine:
 
     # ---------- 行情推进 ----------
     def tick(self):
+        """推进一个 tick：更新价格、聚合 K 线、可能触发新闻。
+
+        【v4.11 性能】整个 tick 放进**一个**事务里提交。
+        原来每只股票要 commit 2~3 次（一次 commit = 一次 fsync），
+        二百多只股票一个 tick 就是四五百次 fsync，而且全程握着群级锁，
+        网页请求全被堵在门外 —— 移动端就表现成「一直转圈 / 偶尔空响应」。
+        现在一个 tick 只提交一次，fsync 次数降到 1/400。
+        """
+        with self.db.batch():
+            return self._tick()
+
+    def _tick(self):
         """推进一个 tick：更新价格、聚合 K 线、可能触发新闻。"""
         rows = self.db.q("SELECT id, price, prev_close, beta, drift, vol, industry, anchor "
                          "FROM companies")

@@ -98,7 +98,13 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ u: qq, pwd: pwd })
-      }).then(function (r) { return r.json(); }).then(function (j) {
+      }).then(function (r) {
+        return r.text().then(function (txt) {
+          if (!txt) throw new Error("服务没返回内容，稍后再试");
+          try { return JSON.parse(txt); }
+          catch (e) { throw new Error("服务返回异常，稍后再试"); }
+        });
+      }).then(function (j) {
         if (!j || j.code !== 200) throw new Error((j && j.message) || "登录失败");
         saveAuth({ g: j.data.g, u: j.data.u, t: j.data.token });
         location.reload();
@@ -121,7 +127,7 @@
            max_loan_abs: 500000, loan_rate_per_day: 0.0005, candle_seconds: 60 },
     cid: null, sel: null, side: "long", lev: 1,
     offset: 0, cross: null, tab: "market", candles: [], busy: false,
-    checkin: null, alerts: [], ach: [], board: [], boardKind: "rich",
+    checkin: null, alerts: [], notices: [], ach: [], board: [], boardKind: "rich",
     reminders: [], myCo: null, market: null, q: "",
     orders: [], coupons: [], vote: null, voteBoard: [], lottery: null, guess: null,
     recovery: null, tier: null, job: null, onboarding: null, quests: [], rise: [],
@@ -182,7 +188,26 @@
     return extra ? s + "&" + extra : s;
   }
   function parse(r) {
-    return r.json().then(function (j) {
+      // 【v4.11】空 body / 半截 body 一律给中文提示。
+      // 以前直接 r.json()：服务端偶发返回空 body 时，浏览器抛的是
+      // "Failed to execute 'json' on 'Response': Unexpected end of JSON input"，
+      // 群友只看到一串英文，完全不知道发生了什么。
+      return r.text().then(function (txt) {
+        if (!txt) {
+          var e0 = new Error("服务没返回内容，稍后自动重试");
+          e0.status = r.status || 0;
+          e0.transient = true;
+          throw e0;
+        }
+        var j;
+        try {
+          j = JSON.parse(txt);
+        } catch (e) {
+          var e1 = new Error("服务返回异常（HTTP " + r.status + "），稍后再试");
+          e1.status = r.status;
+          e1.transient = true;
+          throw e1;
+        }
       if (!j || j.code !== 200) {
         var err = new Error((j && j.message) || ("HTTP " + r.status));
         err.status = r.status;
@@ -198,17 +223,57 @@
     if (!m || /failed to fetch|networkerror|load failed|network request failed/i.test(m)) {
       return "网络断了，稍后再试";
     }
+    // 浏览器原生的 JSON 报错（空响应 / 半截响应）也换成人话
+    if (/unexpected end of json|failed to execute 'json'|unexpected token/i.test(m)) {
+      return "服务没返回内容，正在重试…";
+    }
     return m;
   }
+  /* 【v4.11】网络抖动 / 服务端偶发空响应时自己重试几次。
+     以前一失败就把浏览器英文报错原样弹给群友
+     （"Failed to execute 'json' on 'Response': Unexpected end of JSON input"），
+     看着像网页坏了。现在先自愈，实在不行才提示一句人话。
+     只给 GET 用 —— POST 绝不重试（怕一笔订单下两次）。 */
+  function withRetry(fn, times, delay) {
+    var n = 0;
+    function step() {
+      return fn().catch(function (e) {
+        if (e && e.status === 403) throw e;      // 登录过期了，重试也没用
+        if (n >= times) throw e;
+        n++;
+        return new Promise(function (r) { setTimeout(r, delay * n); }).then(step);
+      });
+    }
+    return step();
+  }
   function get(path, extra) {
-    return fetch(path + "?" + qs(extra), {
-      cache: "no-store",
-      headers: { "X-Token": T }
-    }).then(parse).catch(function (e) {
+    return withRetry(function () {
+      return fetch(path + "?" + qs(extra), {
+        cache: "no-store",
+        headers: { "X-Token": T }
+      }).then(parse);
+    }, 2, 1200).catch(function (e) {
       var err = new Error(friendlyErr(e));
       err.status = e && e.status;
       throw err;
     });
+  }
+  /* 后台轮询失败别刷屏：2 秒一次的刷新失败不是用户操作，
+     弹一次「正在重试」就够了，别让人以为网页炸了。 */
+  var lastNetToast = 0;
+  function netHint(e) {
+    var now = Date.now();
+    if (now - lastNetToast < 20000) return;
+    lastNetToast = now;
+    toast(friendlyErr(e) || "连接有点不稳，正在重试…");
+  }
+  /* 轮询加一点抖动：整群人同一秒打开页面、同一秒轮询，
+     服务端会被瞬间打爆（429 一大半就是这么来的）。 */
+  function pollEvery(ms, fn, jitter) {
+    setTimeout(function tick() {
+      fn();
+      setTimeout(tick, ms + Math.floor(Math.random() * (jitter || 0)));
+    }, Math.floor(Math.random() * (jitter || 0)));
   }
   function post(path, body, method) {
     return fetch(path, {
@@ -598,6 +663,31 @@
     u.textContent = (me.unreal > 0 ? "+" : "") + fmtC(me.unreal);
     u.className = "w-val " + cls(me.unreal);
     $("bankruptBar").hidden = !me.bankrupt;
+    renderNotices();
+  }
+
+  /* v4.11 强平 / 破产 / 风险预警横幅。
+     以前强平这件事只有服务端知道，网页上什么都不显示，玩家只看到仓位列表变空
+     （群友原话「被强平后没持有」）。这里把服务端记下来的通知直接摆出来。 */
+  function renderNotices() {
+    var box = $("noticeBar");
+    if (!box) return;
+    var list = (S.notices || []).filter(function (n) { return n && n.text; });
+    if (!list.length) { box.hidden = true; box.innerHTML = ""; return; }
+    var icon = { liquidation: "⚠️", bankrupt: "💀", risk: "🔔" };
+    var cls = { liquidation: "lvq", bankrupt: "bkp", risk: "rsk" };
+    box.innerHTML = list.map(function (n) {
+      return '<div class="notice-item ' + (cls[n.kind] || "") + '">'
+        + '<span class="notice-ic">' + (icon[n.kind] || "📣") + "</span>"
+        + '<span class="notice-tx"></span>'
+        + '<span class="notice-ts">' + tm(n.ts) + "</span></div>";
+    }).join("");
+    // 文本走 textContent，别拼 HTML（通知里有 % 和数字，拼 HTML 容易出错）
+    var txs = box.querySelectorAll(".notice-tx");
+    for (var i = 0; i < txs.length && i < list.length; i++) {
+      txs[i].textContent = list[i].text;
+    }
+    box.hidden = false;
   }
 
   function renderQuote() {
@@ -953,7 +1043,12 @@
     return true;
   }
 
+  /* 【v4.11】上一轮还没回来就别再发一条 —— 慢网络下请求会堆成山，
+     服务端被打满就更容易返回空响应，形成恶性循环。 */
+  var _stateBusy = false;
   function refreshState() {
+    if (_stateBusy) return Promise.resolve();
+    _stateBusy = true;
     return get("/api/state").then(function (d) {
       if (checkStaticVer(d.static_ver)) return;
       S.companies = d.companies || [];
@@ -964,6 +1059,7 @@
       S.ledger = d.ledger || [];
       S.checkin = d.checkin || S.checkin;
       S.alerts = d.alerts || [];
+      S.notices = d.notices || [];
       S.market = d.market || S.market;
       S.orders = d.orders || [];
       S.coupons = d.coupons || [];
@@ -990,7 +1086,11 @@
       if (!S.changelog) loadChg();
     }).catch(function (e) {
       if (e && e.status === 403) { authExpired(); return; }
-      toast(friendlyErr(e));
+      netHint(e);
+    }).then(function () {
+      _stateBusy = false;
+    }, function () {
+      _stateBusy = false;
     });
   }
 
@@ -2083,9 +2183,9 @@
     refreshReminders();
     refreshFun();
   }).then(function () {
-    setInterval(function () { refreshState(); }, 2000);
-    setInterval(function () { refreshCandles(); }, 5000);
-    setInterval(function () { refreshBoard(); }, 8000);
-    setInterval(function () { refreshFun(); }, 10000);
+    pollEvery(3000, refreshState, 1500);
+    pollEvery(5000, refreshCandles, 2000);
+    pollEvery(8000, refreshBoard, 2500);
+    pollEvery(10000, refreshFun, 3000);
   });
 })();

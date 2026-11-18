@@ -328,6 +328,16 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
 /* ---------------- 破产纾困 ---------------- */
 .bankrupt{display:flex;align-items:center;gap:12px;margin:0 14px 12px;padding:11px 13px;
   border:1px solid rgba(246,70,93,.4);border-radius:12px;background:rgba(246,70,93,.09)}
+.notice-bar{margin:0 14px 12px;padding:9px 11px;border-radius:12px;
+  border:1px solid rgba(217,164,65,.35);background:rgba(217,164,65,.08)}
+.notice-item{display:flex;align-items:flex-start;gap:8px;padding:4px 0;font-size:12px;line-height:1.7}
+.notice-item+.notice-item{border-top:1px solid rgba(255,255,255,.06)}
+.notice-ic{flex:none}
+.notice-tx{flex:1;min-width:0;color:var(--txt);word-break:break-word}
+.notice-ts{flex:none;color:var(--dim);font-size:11px;padding-top:2px}
+.notice-item.lvq .notice-ic{color:#f0c674}
+.notice-item.bkp .notice-ic{color:#ff8b9b}
+.notice-item.rsk .notice-ic{color:#d9a441}
 .bk-text{flex:1;min-width:0;font-size:12px;line-height:1.75;color:var(--txt)}
 .bk-text b{color:#ff8b9b;font-weight:600}
 .bk-sub{color:var(--dim)}

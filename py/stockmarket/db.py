@@ -6,6 +6,7 @@ import os
 import sqlite3
 import threading
 import time
+import contextlib
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
@@ -269,7 +270,21 @@ CREATE TABLE IF NOT EXISTS push_log(
     ts INTEGER NOT NULL
 );
 
+-- v4.11 站内通知（强平 / 破产 / 风险预警）。
+-- 【为什么要补这张表】以前 check_liquidation 返回的提示文案在调度器里被直接丢掉，
+-- 玩家既收不到私信、网页上也没有任何提示，仓位列表直接变空 ——
+-- 群友原话「被强平后没持有，说我仓位太重」。这张表给「系统主动告诉玩家」一个落点。
+CREATE TABLE IF NOT EXISTS notices(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    qq TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'info',
+    text TEXT NOT NULL DEFAULT '',
+    ts INTEGER NOT NULL,
+    seen INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE INDEX IF NOT EXISTS idx_quest_day ON quests(qq, day);
+CREATE INDEX IF NOT EXISTS idx_notice_qq ON notices(qq, id);
 
 CREATE INDEX IF NOT EXISTS idx_pos_qq ON positions(qq, status);
 CREATE INDEX IF NOT EXISTS idx_trade_qq ON trades(qq, ts);
@@ -312,6 +327,7 @@ class GroupDB:
     def __init__(self, path):
         self.path = path
         self.lock = threading.RLock()
+        self._depth = 0
         parent = os.path.dirname(path)
         if parent:
             os.makedirs(parent, exist_ok=True)
@@ -410,14 +426,46 @@ class GroupDB:
     def ex(self, sql, args=()):
         with self.lock:
             cur = self.conn.execute(sql, args)
-            self.conn.commit()
+            if self._depth <= 0:
+                self.conn.commit()
             return cur
 
     def exmany(self, sql, seq):
         with self.lock:
             cur = self.conn.executemany(sql, seq)
-            self.conn.commit()
+            if self._depth <= 0:
+                self.conn.commit()
             return cur
+
+    @contextlib.contextmanager
+    def batch(self):
+        """把一串写操作合成**一次**事务（一次 commit = 一次 fsync）。
+
+        【为什么要这个】engine.tick() 每 tick 会对每只股票 UPDATE 一次、
+        再写一次 K 线，原来每次 ex() 都单独 commit 一次 —— 一次 commit
+        就是一次 fsync。二百多只股票一个 tick = 四五百次 fsync，而且全程
+        握着这把**群级**锁，网页请求全被堵在门外。移动端就表现成
+        「一直转圈 / 偶尔返回空响应」，群里还以为是接口挂了。
+
+        现在一个 tick 只提交一次：fsync 次数降到 1/400，锁持有时间同步
+        缩短，网页基本感觉不到 tick 的存在。
+        """
+        with self.lock:
+            self._depth += 1
+            ok = False
+            try:
+                yield self
+                ok = True
+            finally:
+                self._depth -= 1
+                if self._depth == 0:
+                    if ok:
+                        self.conn.commit()
+                    else:
+                        try:
+                            self.conn.rollback()
+                        except sqlite3.Error:
+                            pass
 
     # --- meta ---------------------------------------------------------
     def get_meta(self, key, default=None):

@@ -18,6 +18,7 @@ import urllib.parse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from flask import Flask, jsonify, request, send_from_directory
+from werkzeug.exceptions import HTTPException
 
 import db as dbmod
 import daily
@@ -256,6 +257,42 @@ def fail(message, code=400):
     return resp
 
 
+@app.after_request
+def _api_no_store(resp):
+    """API 响应一律 no-store。
+
+    【为什么要这个】行情是实时的，任何中间层（运营商透明代理 / 浏览器
+    缓存 / CDN）都不该插手。实测移动端偶尔会拿到一个空的或半截的响应体，
+    前端 r.json() 直接炸成 "Unexpected end of JSON input"。
+    """
+    if request.path.startswith("/api/"):
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        resp.headers["Pragma"] = "no-cache"
+        resp.headers["Expires"] = "0"
+    return resp
+
+
+@app.errorhandler(Exception)
+def _api_json_error(exc):
+    """接口出错时也返回 JSON，别给前端一段 HTML。
+
+    【为什么要这个】Flask 默认给 500 返回 HTML 页面。前端拿 HTML 去
+    JSON.parse 会报 "Unexpected token '<'"，用户完全看不懂。
+    现在出错也是标准 JSON，前端能直接把 message 念出来。
+    """
+    if request.path.startswith("/api/"):
+        code = getattr(exc, "code", 500)
+        if not isinstance(code, int) or not (400 <= code < 600):
+            code = 500
+        try:
+            return fail("服务开小差了，请稍后再试", code)
+        except Exception:
+            return fail("服务开小差了，请稍后再试", 500)
+    if isinstance(exc, HTTPException):
+        return exc
+    return "服务器内部错误", 500
+
+
 def _sign(gid, uid, exp):
     raw = "%s|%s|%s" % (gid, uid, exp)
     return hmac.new(CFG["secret"].encode(), raw.encode(), hashlib.sha256).hexdigest()[:24]
@@ -489,12 +526,23 @@ _RL_BUCKETS = {}
 _RL_LOCK = threading.Lock()
 
 
-def _rate_ok(bucket, limit, window=60.0):
-    """按 IP 的滑动窗口限流；limit<=0 表示不限。"""
+def _rate_ok(bucket, limit, window=60.0, ident=None):
+    """滑动窗口限流；limit<=0 表示不限。
+
+    【v4.11】ident 不为空时按「用户」分桶，而不是按 IP。
+    国内手机卡的出口 IP 是全省共享的，一个运营商 NAT 后面可能站着几十个
+    群友，他们加起来的刷新次数轻松冲过 240 次/分 → 全群集体 429，
+    页面就一直转圈。令牌是 HMAC 验过签的，用 uid 分桶才公平。
+    """
+    return _rate_ok_key(bucket, limit, window, ident)
+
+
+def _rate_ok_key(bucket, limit, window=60.0, ident=None):
+    """限流内核。ident 给了就按它分桶，否则按来源 IP。"""
     if limit <= 0:
         return True
     now = time.time()
-    key = (bucket, request.remote_addr or "-")
+    key = (bucket, ident or (request.remote_addr or "-"))
     with _RL_LOCK:
         hits = [t for t in _RL_BUCKETS.get(key, ()) if now - t < window]
         if len(hits) >= limit:
@@ -1065,14 +1113,14 @@ def api_changelog():
 
 @app.route("/api/state")
 def api_state():
-    if not _rate_ok("read", int(CFG.get("read_limit_per_min", 240))):
-        return fail("刷新太频繁，稍等一下再试", 429)
     gid = request.args.get("g", "0")
     uid = request.args.get("u", "")
     token = request.args.get("t", "")
     handle, uid, err = get_ctx(gid, uid, token)
     if err:
         return err
+    if not _rate_ok("read", int(CFG.get("read_limit_per_min", 240)), ident=uid):
+        return fail("刷新太频繁，稍等一下再试", 429)
     cid = request.args.get("cid", type=int)
     n = request.args.get("n", 240, type=int)
     me = market.account(handle, CFG, uid)
@@ -1084,6 +1132,7 @@ def api_state():
         "rank": market.ranking(handle, CFG, 20),
         "checkin": features.checkin_status(handle, CFG, uid),
         "alerts": features.pending_alerts(handle, uid),
+        "notices": market.recent_notices(handle, uid),
         "market": _market_state(handle),
         "orders": orders.list_orders(handle, uid, 30),
         "coupons": coupons.active(handle, uid),
@@ -1125,14 +1174,14 @@ def api_state():
 
 @app.route("/api/candles")
 def api_candles():
-    if not _rate_ok("read", int(CFG.get("read_limit_per_min", 240))):
-        return fail("刷新太频繁，稍等一下再试", 429)
     gid = request.args.get("g", "0")
     uid = request.args.get("u", "")
     token = request.args.get("t", "")
     handle, uid, err = get_ctx(gid, uid, token)
     if err:
         return err
+    if not _rate_ok("read", int(CFG.get("read_limit_per_min", 240)), ident=uid):
+        return fail("刷新太频繁，稍等一下再试", 429)
     cid = request.args.get("cid", type=int)
     n = min(max(request.args.get("n", 240, type=int), 30), 1000)
     rows = handle.q("SELECT ts,o,h,l,c,v FROM candles WHERE cid=? ORDER BY ts DESC LIMIT ?", (cid, n))
@@ -1917,12 +1966,12 @@ def api_checkin():
 @app.route("/api/board")
 def api_board():
     """榜单：rich 富豪 / profit 盈亏 / hot 涨幅 / limit 涨停。"""
-    if not _rate_ok("read", int(CFG.get("read_limit_per_min", 240))):
-        return fail("刷新太频繁，稍等一下再试", 429)
     handle, uid, err = get_ctx(request.args.get("g"), request.args.get("u"),
                                request.args.get("t"))
     if err:
         return err
+    if not _rate_ok("read", int(CFG.get("read_limit_per_min", 240)), ident=uid):
+        return fail("刷新太频繁，稍等一下再试", 429)
     kind = request.args.get("kind", "rich")
     limit = min(max(request.args.get("n", 10, type=int), 1), 50)
     items = features.boards(handle, CFG, kind, limit)
@@ -2605,6 +2654,31 @@ def push_loop():
 # ---------------------------------------------------------------- 行情调度
 _stop = threading.Event()
 
+_LIQ_PUSH = {}
+_LIQ_PUSH_LOCK = threading.Lock()
+_LIQ_PUSH_GAP = 90          # 同一个人的强平提醒最短间隔（秒），防刷屏
+
+
+def _push_liq_notice(qq, text):
+    """强平 / 破产提醒：QQ 私信推给本人。
+
+    【为什么要单独推】以前 market.check_liquidation 的返回值在调度器里被直接丢掉，
+    玩家既收不到私信、网页上也没有提示，仓位列表凭空清空 —— 群友原话
+    「被强平后没持有，说我仓位太重」。这里补上「系统主动告诉他」这一步。
+    """
+    if not text:
+        return False
+    now_ts = int(time.time())
+    with _LIQ_PUSH_LOCK:
+        last = int(_LIQ_PUSH.get(str(qq), 0) or 0)
+        if now_ts - last < _LIQ_PUSH_GAP:
+            return False
+        _LIQ_PUSH[str(qq)] = now_ts
+    try:
+        return PUSHER.send_private(qq, "【模拟炒股】" + text)
+    except Exception:
+        return False
+
 
 def scheduler():
     while not _stop.is_set():
@@ -2653,12 +2727,23 @@ def scheduler():
                             PUSHER.send_group(gid, "⚖️ 交易所强制清盘\n" + _m)
                     except Exception as exc:
                         print("[stockmarket] settle_day error:", exc, flush=True)
-                # 计息只对有欠款的人生效，但破产判定必须覆盖所有用户：
-                # 净值可能因为手续费、还款差额等原因变负，而这时既没持仓也没欠款。
-                for u in handle.q("SELECT qq FROM users"):
+                # 【v4.11 性能】只扫「有可能被强平 / 破产 / 计提利息」的人：
+                #   有持仓的 + 有欠款的 + 现金已经为负的。
+                # 以前是无脑 SELECT qq FROM users 全表扫，每个用户每 tick
+                # 都要跑一遍 check_liquidation（每人 3~5 条 SQL），
+                # 八个群几百号人加起来每秒上千次查询 —— 群级锁被它占满，
+                # 网页请求排在后面，页面就一直转圈 / 偶尔空响应。
+                # 漏掉谁：没有持仓、没有欠款、现金还是正数的用户，
+                # 净值 = 现金 + 0 + 0 - 0 = 现金，不可能变负，
+                # 既不会被强平也不会破产，扫了也是白扫。
+                for u in handle.q(
+                        "SELECT qq FROM users WHERE loan > 0 OR cash < 0 "
+                        "UNION SELECT DISTINCT qq FROM positions WHERE status='open'"):
                     qq = u["qq"]
                     market.accrue_interest(handle, CFG, qq)
-                    market.check_liquidation(handle, CFG, qq)
+                    _liq_msg = market.check_liquidation(handle, CFG, qq)
+                    if _liq_msg:
+                        _push_liq_notice(qq, _liq_msg)
             except Exception as exc:  # 调度器不能因为单群异常停摆
                 print("[stockmarket] scheduler error: group=%s %s" % (gid, exc), flush=True)
         _stop.wait(CFG["tick_seconds"])

@@ -122,6 +122,82 @@ def _ledger(db, qq, delta, reason):
           (str(qq), now(), round(delta, 2), round(bal, 2), reason))
 
 
+# ---------------------------------------------------------------- 站内通知
+NOTICE_KIND_LIQ = "liquidation"
+NOTICE_KIND_BANKRUPT = "bankrupt"
+NOTICE_KIND_RISK = "risk"
+WARN_COOLDOWN = 900           # 风险预警冷却（秒）：15 分钟内不重复喊
+
+
+def add_notice(db, qq, kind, text):
+    """写一条站内通知。网页横幅和 QQ 私信共用同一份文案。"""
+    if not text:
+        return ""
+    try:
+        db.ex("INSERT INTO notices(qq,kind,text,ts) VALUES(?,?,?,?)",
+              (str(qq), kind, text, now()))
+    except Exception:
+        return ""
+    return text
+
+
+def recent_notices(db, qq, limit=6):
+    """最近几条站内通知（新的在前）。"""
+    rows = db.q("SELECT id,kind,text,ts FROM notices WHERE qq=? ORDER BY id DESC LIMIT ?",
+                (str(qq), int(limit)))
+    return [{"id": r["id"], "kind": r["kind"], "text": r["text"], "ts": r["ts"]}
+            for r in rows]
+
+
+def _risk_notice(db, cfg, qq, acct, own_margin):
+    """净值逼近维持线时先喊一嗓子（15 分钟冷却）。
+
+    【为什么要预警】以前这条路上只有「已经强平」这一个动作：玩家来不及减仓，
+    仓位被一次性清空，还没人告诉他为什么。预警给的是「自己动手」的机会。
+
+    【v4.11 修正口径】原来拿「净值 / 自有保证金 ≤ 1.35」当触发条件。
+    但 20 倍满仓开仓那一刻，这个比值就只有 1.09（手续费先吃掉一点），
+    等于一开仓就喊「快被强平」，天天误报，玩家直接把它当噪音。
+    现在改成拿**真正会强平的那两条线**当基准：
+      1) 维持保证金强平线 = 自有保证金 × 维持比例（净值跌破它就全部平掉）
+      2) 逐笔止损线 = 该笔浮亏 ≥ 该笔保证金（单笔被平掉）
+    两边都算一遍「离被强平还差多远」，真的快到了才喊。
+    """
+    equity = float(acct["equity"])
+    liq_line = float(own_margin) * float(cfg.get("maintenance_rate", 0.5))
+    near_liq = liq_line > 0 and equity <= liq_line * 1.6
+    near_stop = False
+    stop_txt = ""
+    for p in _positions(db, qq):
+        margin = float(p["margin"] or 0)
+        if margin <= 0:
+            continue
+        sign = 1 if p["side"] == "long" else -1
+        pl = (p["price"] - p["entry"]) * p["qty"] * sign
+        ratio = pl / margin          # 逐笔止损线在 -1
+        if ratio <= -0.7:
+            near_stop = True
+            stop_txt = "「%s」浮亏已达该笔止损线的 %.0f%%" % (p["name"], -ratio * 100)
+    if not (near_liq or near_stop):
+        return ""
+    row = db.q1("SELECT ts FROM notices WHERE qq=? AND kind='risk' ORDER BY id DESC LIMIT 1",
+                (str(qq),))
+    now_ts = int(time.time())
+    if row and now_ts - int(row["ts"] or 0) < WARN_COOLDOWN:
+        return ""
+    bits = []
+    if near_liq:
+        bits.append("净值 %.0f 元，维持保证金强平线 %.0f 元（自有保证金 %.0f 元 × %.2f），"
+                    "再亏 %.0f 元就会被一次性全部平掉"
+                    % (equity, liq_line, float(own_margin),
+                       float(cfg.get("maintenance_rate", 0.5)), max(0.0, equity - liq_line)))
+    if near_stop:
+        bits.append(stop_txt)
+    text = ("⚠️ 风险预警：仓位太重了 —— %s。"
+            "建议先减仓或平掉一部分，别等被强制平仓。" % "；".join(bits))
+    return add_notice(db, qq, NOTICE_KIND_RISK, text)
+
+
 # ---------------------------------------------------------------- 下单
 def place_order(db, cfg, qq, cid, side, qty, leverage, price=None):
     """开仓：做多 / 做空，支持杠杆。返回 (ok, msg, info)。"""
@@ -231,6 +307,13 @@ def close_position(db, cfg, qq, pos_id, force=False, qty=None):
     if not force and coupons.use(db, qq, "fee_free", 1):
         fee = 0.0
     margin_out = p["margin"] * part
+    # 【v4.11】强平手续费不得把现金扣成负数。
+    # 逐笔止损那条线是「这笔的亏损正好等于它自己的保证金」，此时
+    # margin_out + pl 已经被亏成 0，再扣一次强平手续费（2 倍）就会把现金打成负数
+    # → 净值变负 → 平仓即破产（「被强平后没持有」的最后一根稻草）。
+    # 现在：手续费最多吃掉「保证金 + 盈亏」剩下的部分，保证现金不为负。
+    if force and margin_out + pl - fee < 0:
+        fee = max(0.0, margin_out + pl)
     cash_delta = margin_out + pl - fee
     db.ex("UPDATE users SET cash=cash+?, win=win+?, lose=lose+? WHERE qq=?",
           (cash_delta, max(pl, 0.0), max(-pl, 0.0), qq))
@@ -285,6 +368,10 @@ def check_liquidation(db, cfg, qq):
     # 现在给一个下限：至少把总保证金的 loan_shield_min 计入自有保证金。
     shield = float(cfg.get("loan_shield_min", 0.3))
     own_margin = max(acct["margin"] * shield, acct["margin"] - loan)
+    # 【v4.11 风险预警】净值逼近维持线时先提醒一次（15 分钟冷却）。
+    # 以前这条路上只有「已经强平」，玩家只能看着仓位凭空消失。
+    if acct["margin"] > 0 and acct["equity"] > 0:
+        _risk_notice(db, cfg, qq, acct, own_margin)
     if acct["margin"] > 0 and acct["equity"] <= own_margin * cfg["maintenance_rate"]:
         for p in _positions(db, qq):
             ok, msg, _ = close_position(db, cfg, qq, p["id"], force=True)
@@ -328,11 +415,14 @@ def check_liquidation(db, cfg, qq):
         db.ex("UPDATE users SET bankrupt=1 WHERE qq=?", (str(qq),))
         if was_relief:
             if msgs:
-                return "触发强制平仓：" + "；".join(msgs)
+                text = "触发强制平仓：" + "；".join(msgs)
+                add_notice(db, qq, NOTICE_KIND_LIQ, text)
+                return text
             return None
         cut_msg = recovery.on_bankrupt(db, cfg, str(qq))
         acct = account(db, cfg, qq)   # 减免之后净值可能当场回正
         head = ("你被强制平仓并宣告破产：" + "；".join(msgs)) if msgs else "你的净值已经为负，宣告破产。"
+        add_notice(db, qq, NOTICE_KIND_BANKRUPT, head)
         if acct["equity"] >= 0:
             recovery.sync_bankrupt(db, cfg, str(qq), acct["equity"])
             return head + "\n清算之后你的净值回正到 %.2f，已自动恢复交易资格。" % acct["equity"]
@@ -347,7 +437,9 @@ def check_liquidation(db, cfg, qq):
         if recovery.sync_bankrupt(db, cfg, str(qq), acct["equity"]):
             return "你的净值已经回正到 %.2f，破产状态解除，可以重新交易了！" % acct["equity"]
     if msgs:
-        return "触发强制平仓：" + "；".join(msgs)
+        text = "触发强制平仓：" + "；".join(msgs)
+        add_notice(db, qq, NOTICE_KIND_LIQ, text)
+        return text
     return None
 
 
