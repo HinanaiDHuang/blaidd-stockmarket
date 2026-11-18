@@ -2,6 +2,18 @@
 (function () {
   "use strict";
 
+  // 这个页面加载时用的前端版本（取自自身 script URL 的 ?v=）。
+  // 服务端 /api/state 会回一个当前版本；两者不一致 = 这个页面是旧版，
+  // 页面会自己重载一次（见 checkStaticVer），群友不用清缓存、不用等公告。
+  var PAGE_VER = (function () {
+    try {
+      var src = document.currentScript && document.currentScript.src;
+      if (!src) return "";
+      var m = src.match(/[?&]v=([0-9A-Za-z_.\-]+)/);
+      return m ? m[1] : "";
+    } catch (e) { return ""; }
+  })();
+
   // 令牌在 fragment(#t=) 里：浏览器不会把它发给服务器，就不会进服务端日志。
   // 老链接（?t=）仍然兼容。
   var Q = new URLSearchParams(location.search);
@@ -903,9 +915,35 @@
     $("btnPeek").textContent = "🔮 买内幕消息（" + (S.cfg.peek_cost || 800) + " 元）";
   }
 
+  // 自动重载后，给群友一句提示
+  (function () {
+    try {
+      var k = "sm_reload_notice";
+      if (sessionStorage.getItem(k)) {
+        sessionStorage.removeItem(k);
+        setTimeout(function () { toast("已更新到最新版本"); }, 800);
+      }
+    } catch (e) {}
+  })();
+
   /* ---------------------------------------------------------- 数据 */
+  function checkStaticVer(serverVer) {
+    // 页面比服务器上的前端旧 -> 自己重载一次。
+    // sessionStorage 做闸：万一重载后还是不一致（比如 CDN 缓存），不会无限刷。
+    if (!serverVer || !PAGE_VER || serverVer === PAGE_VER) return false;
+    var key = "sm_reload_" + serverVer;
+    try {
+      if (sessionStorage.getItem(key)) return false;
+      sessionStorage.setItem(key, "1");
+      sessionStorage.setItem("sm_reload_notice", "1");
+    } catch (e) { return false; }
+    try { location.reload(); } catch (e) { return false; }
+    return true;
+  }
+
   function refreshState() {
     return get("/api/state").then(function (d) {
+      if (checkStaticVer(d.static_ver)) return;
       S.companies = d.companies || [];
       S.news = d.news || [];
       S.me = d.me;

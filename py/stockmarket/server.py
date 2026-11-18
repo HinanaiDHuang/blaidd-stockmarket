@@ -107,6 +107,16 @@ TOKEN_TTL = 60 * 60 * 24 * int(CFG.get("token_ttl_days", 7))
 # 主人明说不要在群里发公告，那就把变更说清楚放网页上。
 CHANGELOG = [
     {
+        "ver": "v4.9.2",
+        "date": "2026-11-18",
+        "title": "页面自己会更新了",
+        "items": [
+            "不用清缓存：服务端所有页面资源都是 no-cache，浏览器刷新就会自动核对版本",
+            "不用等公告：页面开着不动也会自己发现「服务端更新了」并自动重载",
+            "自动重载后会提示一句「已更新到最新版本」",
+        ],
+    },
+    {
         "ver": "v4.9.1",
         "date": "2026-11-18",
         "title": "打工面板说实话",
@@ -451,6 +461,37 @@ def _onboarding(handle, cfg, uid):
 
 
 # ---------------------------------------------------------------- 页面
+# ---------------------------------------------------------------- 前端版本
+_STATIC_VER = {"v": "", "t": 0}
+
+
+def static_version():
+    """当前前端资源版本号（= static/index.html 里 ?v= 的值）。
+
+    【为什么要有它】群里有人问「改了 UI 他们要清缓存吗」——
+    答案是不用：服务端对 / 和 /static/* 都发 Cache-Control: no-cache，
+    浏览器刷新就会回服务器确认（304=你那份还是最新，200=有更新）。
+    但**一直开着的旧标签页**不会自己换 js/css（页面里的定时器只刷数据），
+    群友会以为「改了没生效」。这个版本号让旧页面能自己发现
+    「服务器上的前端已经变了」并自动重载，不用群友手动清缓存、不用发公告。
+
+    单一事实来源就是 index.html 里的 ?v= —— 改前端时把它换掉，
+    这里的版本号就跟着变，客户端一比对就知道自己落后了。
+    """
+    path = os.path.join(BASE_DIR, "static", "index.html")
+    try:
+        mtime = int(os.stat(path).st_mtime)
+        if mtime != _STATIC_VER["t"]:
+            with open(path, "r", encoding="utf-8") as fp:
+                html = fp.read()
+            m = re.search(r"[?&]v=([0-9A-Za-z_.\-]+)", html)
+            _STATIC_VER["v"] = m.group(1) if m else ""
+            _STATIC_VER["t"] = mtime
+    except Exception:
+        pass
+    return _STATIC_VER["v"]
+
+
 @app.route("/")
 def index():
     return send_from_directory(os.path.join(BASE_DIR, "static"), "index.html")
@@ -879,6 +920,7 @@ def api_state():
         "onboarding": _onboarding(handle, CFG, uid),
         "quests": daily.quest_state(handle, CFG, uid),
         "rise": daily.rise_state(handle, CFG, uid),
+        "static_ver": static_version(),
         "candles": [],
         "cid": cid,
         "trades": _trade_rows(handle, uid),

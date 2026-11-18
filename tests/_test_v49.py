@@ -203,6 +203,27 @@ check("T6.8 档位越高上限越高", float(st2["cap"]) > float(st["cap"]),
       "%s vs %s" % (st2.get("cap"), st.get("cap")))
 check("T6.9 没打工时 earned=0", float(st2["earned"]) == 0.0, str(st2.get("earned")))
 
+# ============================================================ T7 前端版本自检
+print("[T7] 前端版本自检（挂着旧页面自动重载）")
+import re as _re
+_idx = io.open(os.path.join(SRC_DIR, "static", "index.html"), encoding="utf-8").read()
+_m = _re.search(r"[?&]v=([0-9A-Za-z_.\-]+)", _idx)
+check("T7.1 index.html 里有 ?v= 版本号", bool(_m), _idx[:0])
+_ver = _m.group(1) if _m else ""
+_appjs = io.open(os.path.join(SRC_DIR, "static", "app.js"), encoding="utf-8").read()
+check("T7.2 css / js 都带同一个 ?v=",
+      ("style.css?v=" + _ver) in _idx and ("app.js?v=" + _ver) in _idx, _ver)
+import server as _srv
+check("T7.3 服务端能读出当前前端版本", _srv.static_version() == _ver,
+      "srv=%s idx=%s" % (_srv.static_version(), _ver))
+check("T7.4 前端记录了自己加载时的版本", "PAGE_VER" in _appjs)
+check("T7.5 前端会比对服务端版本", "static_ver" in _appjs and "checkStaticVer" in _appjs)
+check("T7.6 版本不一致会自动重载", "location.reload()" in _appjs)
+check("T7.7 重载有防循环闸", "sm_reload_" in _appjs and "sessionStorage.getItem(key)" in _appjs)
+check("T7.8 重载后给群友一句提示", "sm_reload_notice" in _appjs)
+check("T7.9 /api/state 会把版本带给前端", "static_ver" in io.open(
+    os.path.join(SRC_DIR, "server.py"), encoding="utf-8").read())
+
 print("")
 if FAILED:
     print("FAILED: %s" % ", ".join(FAILED))
