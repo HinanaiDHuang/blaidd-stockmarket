@@ -224,6 +224,22 @@ check("T7.8 重载后给群友一句提示", "sm_reload_notice" in _appjs)
 check("T7.9 /api/state 会把版本带给前端", "static_ver" in io.open(
     os.path.join(SRC_DIR, "server.py"), encoding="utf-8").read())
 
+# ============================================================ T8 挥霍额度可见
+print("[T8] 挥霍每日额度要看得见（不然点了才被拒）")
+st = tycoon.luxury_status(db, cfg, "7006")
+check("T8.1 status 里有 limit", "limit" in st, str(st.keys()))
+check("T8.2 status 里有 used / left", ("used" in st and "left" in st), str(st.keys()))
+check("T8.3 limit 等于配置值", int(st["limit"]) == lim, str(st.get("limit")))
+check("T8.4 used 等于今天已买次数", int(st["used"]) == 2, str(st.get("used")))
+check("T8.5 left 算得对", int(st["left"]) == max(0, lim - 2), str(st.get("left")))
+check("T8.6 额度用完时 full=True", st["full"] is True, str(st.get("full")))
+st2 = tycoon.luxury_status(db, cfg, "7009")
+check("T8.7 没用过额度时 full=False 且 left=limit",
+      st2["full"] is False and int(st2["left"]) == lim, str(st2))
+_app = io.open(os.path.join(SRC_DIR, "static", "app.js"), encoding="utf-8").read()
+check("T8.8 前端把额度显示出来", "st.limit" in _app and "st.left" in _app)
+check("T8.9 额度用完时按钮置灰", "st.full" in _app)
+
 print("")
 if FAILED:
     print("FAILED: %s" % ", ".join(FAILED))

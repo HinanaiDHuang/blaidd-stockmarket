@@ -485,9 +485,15 @@ def luxury_status(db, cfg, qq):
         return None
     eq = _equity(db, cfg, qq)
     price = luxury_price(cfg, eq)
+    # 每日额度一起给前端：不然群友点「买」被拒了才知道今天买过，
+    # 看着像 bug，其实只是额度用完了（打土豪那边早就是「还能出手 N/M 次」的写法）。
+    limit = int(cfg.get("luxury_daily_limit", 2) or 2)
+    used = luxury_count_today(db, qq)
     return {"qq": qq, "equity": round(eq, 2), "price": price,
             "cash": round(_cash(db, qq), 2), "rep": round(_rep(db, qq), 2),
-            "tier": tiers.tier_name(eq), "items": LUXURY}
+            "tier": tiers.tier_name(eq), "items": LUXURY,
+            "used": used, "limit": limit, "left": max(0, limit - used),
+            "full": used >= limit}
 
 
 def luxury_buy(db, cfg, qq, key):

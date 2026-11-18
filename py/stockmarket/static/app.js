@@ -1605,12 +1605,19 @@
     if (S.msg.lux) h += `<div class="ty-msg">${esc(S.msg.lux).replace(/\n/g, "<br>")}</div>`;
     h += `<div class="ty-line">\u51c0\u503c <b>${fmtInt(st.equity)}</b> \u5143 \u00b7 \u58f0\u671b <b>${st.rep}</b></div>`;
     h += `<div class="ty-line">\u4e00\u5355\u5927\u7ea6 <b>${fmtInt(st.price)}</b> \u5143\uff08\u51c0\u503c\u7684 5%\uff09\u3002\u58f0\u671b\u8d8a\u9ad8\u8d8a\u4e0d\u5bb9\u6613\u88ab\u4eba\u62a2\u3002</div>`;
+    if (st.limit != null) {
+      if (st.full) {
+        h += `<div class="ty-line job-tip">\u4eca\u5929\u7684\u989d\u5ea6\u7528\u5b8c\u4e86\uff08${st.used}/${st.limit}\uff09\uff0c\u660e\u5929\u518d\u6765\u3002</div>`;
+      } else {
+        h += `<div class="ty-line">\u4eca\u5929\u8fd8\u80fd\u6325\u970d <b>${st.left}</b> / ${st.limit} \u6b21</div>`;
+      }
+    }
     h += `<div class="ty-sub">\u6392\u9762\u6e05\u5355</div>`;
     for (var i = 0; i < st.items.length; i++) {
       var it = st.items[i];
       h += `<div class="ty-target">
               <span class="ty-name">${it.emoji} ${esc(it.name)}<span class="r-sub">\u58f0\u671b +${it.rep} \u00b7 ${esc(it.desc)}</span></span>
-              <button class="mini-btn" type="button" data-lux="${esc(it.name)}">\u4e70</button>
+              <button class="mini-btn" type="button" data-lux="${esc(it.name)}"${st.full ? " disabled" : ""}>${st.full ? "\u4eca\u5929\u6ca1\u989d\u5ea6\u4e86" : "\u4e70"}</button>
             </div>`;
     }
     box.innerHTML = h;
