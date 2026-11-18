@@ -1,4 +1,4 @@
-# ---------------------------------------------------------------------------
+﻿# ---------------------------------------------------------------------------
 # 部署「布莱泽模拟炒股」到生产服务器
 # 用法：.\deploy_stockmarket.ps1 -Zip "C:\AstrBot\deploy\stockmarket.zip"
 #                  -PublicHost "203.0.113.10:9030" -BotQQ "123456789"
@@ -20,6 +20,8 @@ param(
     [string]$SM    = 'C:\DiceDriver.LLOneBot\py\stockmarket',
     [string]$BotQQ = 'YOUR_BOT_QQ',
     [string]$PublicHost = 'YOUR_SERVER_IP:9030',
+    # 逗号分隔的群号；不传就保持包里的原样（仓库里默认是空的）
+    [string]$PushGroups = '',
     [string]$DEP   = 'C:\AstrBot\deploy',
     [string]$PY    = 'C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe',
     [string]$NSSM  = 'C:\DiceDriver.LLOneBot\nssm.exe',
@@ -69,6 +71,15 @@ Log ("backup -> " + $BK)
 if (Test-Path "$STG\config.json") {
     $c = Get-Content "$STG\config.json" -Raw -Encoding UTF8
     $c = $c.Replace('YOUR_SERVER_IP', $PublicHost.Split(':')[0])
+    if ($PushGroups -ne '') {
+        $items = @()
+        foreach ($g in ($PushGroups -split ',')) {
+            $t = $g.Trim()
+            if ($t -ne '') { $items += ('"' + $t + '"') }
+        }
+        $arr = '[' + ($items -join ', ') + ']'
+        $c = [regex]::Replace($c, '"push_groups"\s*:\s*\[[^\]]*\]', ('"push_groups": ' + $arr))
+    }
     [System.IO.File]::WriteAllText("$STG\config.json", $c, (New-Object System.Text.UTF8Encoding($false)))
 }
 if ($lua -and (Test-Path "$STG\chaogu.lua")) {

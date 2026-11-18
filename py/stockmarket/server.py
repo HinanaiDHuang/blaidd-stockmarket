@@ -107,6 +107,16 @@ TOKEN_TTL = 60 * 60 * 24 * int(CFG.get("token_ttl_days", 7))
 # 主人明说不要在群里发公告，那就把变更说清楚放网页上。
 CHANGELOG = [
     {
+        "ver": "v4.9.1",
+        "date": "2026-11-18",
+        "title": "打工面板说实话",
+        "items": [
+            "打工面板改成按你的档位实时显示：当前职级、每日上限、今日已挣、还剩多少",
+            "中下层会在打工面板里看到「翻身任务」提示，直接告诉你钱在哪儿",
+            "帮助页补了翻身任务说明和新的打工上限规则",
+        ],
+    },
+    {
         "ver": "v4.9",
         "date": "2026-11-18",
         "title": "打工不再压过炒股",
@@ -865,6 +875,7 @@ def api_state():
         "guess": fun.guess_status(handle, CFG, uid),
         "recovery": recovery.status(handle, CFG, uid),
         "tier": tycoon.tier_status(handle, CFG, uid),
+        "job": market.job_status(handle, CFG, uid),
         "onboarding": _onboarding(handle, CFG, uid),
         "quests": daily.quest_state(handle, CFG, uid),
         "rise": daily.rise_state(handle, CFG, uid),

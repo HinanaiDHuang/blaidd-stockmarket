@@ -8,10 +8,11 @@ Dice! 机器人里的「布莱泽模拟炒股」功能源码。**这条路和 As
 > 的 `main` 分支 `workspace.md`；那个仓库里的 `codex/stockmarket-src` 分支只是**本仓库的镜像**，
 > 改代码请以本仓库为准。
 
-## 当前版本：v4.9
+## 当前版本：v4.9.1
 
 | 版本 | 日期 | 做了什么 |
 |---|---|---|
+| v4.9.1 | 2026-11-18 | 打工面板按档位实时显示（职级 / 日上限 / 已挣 / 剩余）；中下层在打工面板直接看到「翻身任务」引导；帮助页补翻身任务与新上限规则 |
 | v4.9 | 2026-11-18 | 打工日上限按档位拉开（150→1000）；中下层「翻身任务」；挥霍每日额度；打土豪目标脱敏 |
 | v4.8 | 2026-11-18 | 网页端大改版（5 tab + 18 功能宫格 + 新手引导 + 档位进度条）；会员费提档（巨富 0.14%→0.20%、财阀 0.18%→0.26%）；强制清盘宽限期 7 天→3 天；网页「最近改动」公告按钮 |
 | v4.7 | 2026-11-18 | 富豪经济：净值分层会员费 / 打土豪 / 挥霍消费 / 全民分红池；解冻死钱（破产满 N 天强制清盘） |
@@ -66,11 +67,28 @@ python run_tests.py v48        # 只跑名字含 v48 的
 3. 服务器上跑 `deploy/deploy_stockmarket.ps1`：
 
    ```powershell
-   .\deploy_stockmarket.ps1 -Zip "C:\AstrBot\deploy\stockmarket.zip"
+   .\deploy_stockmarket.ps1 `
+     -Zip "C:\AstrBot\deploy\stockmarket.zip" `
+     -BotQQ "你的BotQQ" `
+     -PublicHost "你的服务器IP:9030" `
+     -PushGroups "群号1,群号2" `
+     -SkipLua
    ```
 
    脚本会：编译检查（用服务自己的 python 3.10）→ 全量备份 → 覆盖 → `nssm restart DicePyStock`
    → 打 `/health`；不健康**自动回滚**。
+
+   参数说明：
+
+   | 参数 | 作用 | 不传会怎样 |
+   |---|---|---|
+   | `-BotQQ` | 注入 `config.json` / Lua 里的 BotQQ 占位符 | 脚本 `exit 4` 直接中止 |
+   | `-PublicHost` | 注入 `config.json` / Lua 里的服务器 IP 占位符 | 脚本 `exit 4` 直接中止 |
+   | `-PushGroups` | 写入 `config.json` 的 `push_groups`（逗号分隔） | **保持包里的原样**；公开仓里这字段是空的，不传就会把群推送静默关掉 |
+   | `-SkipLua` | 本次不碰 `plugin/炒股.lua` | 默认会一起覆盖 Lua（改 Lua 还要另外重启 Dice! 核心） |
+
+   > ⚠️ `.ps1` 必须存成 **UTF-8 with BOM**。Windows PowerShell 5.1 在没有 BOM 时
+   > 会按 GBK 解析，中文注释直接语法错，脚本一行都跑不起来。
 
 ## 热更新口径
 

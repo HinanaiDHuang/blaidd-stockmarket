@@ -182,6 +182,27 @@ check("T5.3 任务文案带翻身任务区块", "翻身任务" in txt, txt[-80:]
 check("T5.4 高净值用户的任务文案没有翻身任务",
       "翻身任务" not in daily.quests_text(db, cfg, "7005"))
 
+# ============================================================ T6 打工面板状态
+print("[T6] 打工面板状态（网页端动态显示）")
+mk("7010", "打工仔", 50000.0)
+st = market.job_status(db, cfg, "7010")
+check("T6.1 有状态返回", isinstance(st, dict) and st.get("cap") is not None, str(st)[:80])
+check("T6.2 档位上限跟 job_cap_by_tier 一致",
+      abs(float(st["cap"]) - float(market.job_cap_by_tier(cfg, equity_of("7010")))) < 0.01,
+      "%s vs %s" % (st.get("cap"), market.job_cap_by_tier(cfg, equity_of("7010"))))
+check("T6.3 剩余 = 上限 - 已挣", abs(float(st["left"]) - max(0.0, float(st["cap"]) - float(st["earned"]))) < 0.01,
+      str(st)[:120])
+check("T6.4 档位名有值", bool(st.get("tier")), str(st.get("tier")))
+check("T6.5 职级有值", bool(st.get("level")), str(st.get("level")))
+check("T6.6 冷却可读", int(st.get("cooldown") or 0) > 0, str(st.get("cooldown")))
+check("T6.7 还没打工就是 ready", st.get("ready") is True and int(st.get("wait") or 0) == 0,
+      "ready=%s wait=%s" % (st.get("ready"), st.get("wait")))
+mk("7011", "大款", 3000000.0)
+st2 = market.job_status(db, cfg, "7011")
+check("T6.8 档位越高上限越高", float(st2["cap"]) > float(st["cap"]),
+      "%s vs %s" % (st2.get("cap"), st.get("cap")))
+check("T6.9 没打工时 earned=0", float(st2["earned"]) == 0.0, str(st2.get("earned")))
+
 print("")
 if FAILED:
     print("FAILED: %s" % ", ".join(FAILED))

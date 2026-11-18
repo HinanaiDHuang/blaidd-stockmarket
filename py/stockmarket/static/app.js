@@ -112,7 +112,7 @@
     checkin: null, alerts: [], ach: [], board: [], boardKind: "rich",
     reminders: [], myCo: null, market: null, q: "",
     orders: [], coupons: [], vote: null, voteBoard: [], lottery: null, guess: null,
-    recovery: null, tier: null, onboarding: null, quests: [], rise: [],
+    recovery: null, tier: null, job: null, onboarding: null, quests: [], rise: [],
     rob: null, luxury: null, dividend: null, wealth: null,
     openPanel: null, loaded: {}, msg: {}, changelog: null
   };
@@ -898,6 +898,7 @@
     renderTier();
     renderOnboard();
     renderQuest();
+    renderJob();
     syncSabotageBtn();
     $("btnPeek").textContent = "🔮 买内幕消息（" + (S.cfg.peek_cost || 800) + " 元）";
   }
@@ -921,6 +922,7 @@
       S.guess = d.guess || S.guess;
       S.recovery = d.recovery || S.recovery;
       S.tier = d.tier || null;
+      S.job = d.job || null;
       S.onboarding = d.onboarding || null;
       S.quests = d.quests || [];
       S.rise = d.rise || [];
@@ -1266,11 +1268,11 @@
 
     "<h4>\u2463 \u6bcf\u5929\u8be5\u5e72\u7684\u4e8b</h4>",
     "<p>\u2460 <b>\u7b7e\u5230</b>\uff08\u8fde\u7b7e\u6ee1 7 \u5929\u6709\u5927\u8d4f\uff09\uff1b\u2461 <b>\u62bd\u5956</b>\uff08\u514d\u8d39\uff0c\u62bd\u73b0\u91d1\u548c\u9053\u5177\u5238\uff09\uff1b",
-    "\u2462 <b>\u4efb\u52a1</b>\uff08\u505a\u5b8c\u6709\u5956\u52b1\uff09\uff1b\u2463 <b>\u4eba\u6c14\u6295\u7968</b>\uff08\u6bcf\u5929\u4e00\u7968\uff09\uff1b",
+    "\u2462 <b>\u4efb\u52a1</b>\uff08\u505a\u5b8c\u6709\u5956\u52b1\uff1b<b>翻身任务</b>\uff08净值 20 万以下专属，真下单买、平仓、签到都能拿钱\uff09\uff1b\u2463 <b>\u4eba\u6c14\u6295\u7968</b>\uff08\u6bcf\u5929\u4e00\u7968\uff09\uff1b",
     "\u2464 <b>\u6da8\u505c\u7ade\u731c</b>\uff08\u62bc\u4e00\u53ea\uff0c\u731c\u4e2d\u62ff 2000 \u5143\uff09\u3002</p>",
 
     "<h4>\u2464 \u8d5a\u94b1\u7684\u8def\u5b50</h4>",
-    "<p><b>\u80a1\u7968</b>\u662f\u4e3b\u4e1a\uff0c\u6ce2\u52a8\u5927\uff1b<b>\u6253\u5de5</b>\u662f\u5e94\u6025\uff0c\u5de5\u8d44\u6309\u96c7\u4e3b\u8eab\u5bb6\u7684 0.4% \u7b97\uff0c\u6bcf\u5929\u5c01\u9876 2000 \u5143\uff1b",
+    "<p><b>\u80a1\u7968</b>\u662f\u4e3b\u4e1a\uff0c\u6ce2\u52a8\u5927\uff1b<b>\u6253\u5de5</b>\u662f\u5e94\u6025\uff0c工资按雇主身家的比例结算，每日上限按你的档位走（普通股民 150，财阀 1000），职级越高冷却越长；",
     "<b>\u4f1a\u5458\u8d39</b>\u662f\u51c0\u503c\u8d8a\u9ad8\u6bcf\u5929\u4ea4\u8d8a\u591a\uff08\u4f46\u4f60\u4e5f\u62ff\u5230\u66f4\u591a\u7279\u6743\uff09\uff1b",
     "<b>\u5168\u6c11\u5206\u7ea2</b>\u628a\u5bcc\u8c6a\u4ea4\u7684\u4f1a\u5458\u8d39\u6309\u6d3b\u8dc3\u5ea6 + \u8d2b\u56f0\u5ea6\u53d1\u56de\u7fa4\u91cc\uff0c\u8d2b\u5b97\u62ff\u5f97\u591a\uff1b",
     "<b>\u6253\u571f\u8c6a</b>\u82b1\u5c0f\u94b1\u62a2\u5bcc\u8c6a\u7684\u73b0\u91d1\uff0c\u8d8a\u5bcc\u8d8a\u597d\u62a2\uff0c\u7ffb\u8f66\u5bf9\u65b9\u53cd\u62ff 20%\uff1b",
@@ -1738,6 +1740,37 @@
       }
     }
     box.innerHTML = h;
+  }
+
+  /* 打工面板：日上限按档位走，直接把真实数字摆出来，别再写死「封顶 2000」 */
+  function renderJob() {
+    var box = $("jobStat");
+    if (!box) return;
+    var st = S.job;
+    if (!st) { box.innerHTML = ""; return; }
+    var pct = st.cap > 0 ? Math.min(100, st.earned / st.cap * 100) : 0;
+    var h = "";
+    h += `<div class="ty-line">💼 当前职级 <b>${esc(st.level)}</b> · 档位 <b>${esc(st.tier)}</b> · 每日上限 <b>${fmtInt(st.cap)}</b> 元</div>`;
+    h += `<div class="ty-line">今日已挣 <b>${fmtInt(st.earned)}</b> / ${fmtInt(st.cap)} 元 · 还剩 <b>${fmtInt(st.left)}</b> 元</div>`;
+    h += `<div class="job-bar"><i style="width:${pct.toFixed(1)}%"></i></div>`;
+    if (st.bankrupt) {
+      h += `<div class="ty-line job-tip">🆘 破产纾困中：打工上限 ${fmtInt(st.cap)} 元，签到翻倍、贷款免息。</div>`;
+    } else if (st.full) {
+      h += `<div class="ty-line job-tip">今天已经挣满了，明天再来 —— 想赚大钱只能去炒股。</div>`;
+    } else if (st.wait > 0) {
+      h += `<div class="ty-line job-tip">⏳ 老板让你歇会儿，<b>${st.wait}</b> 秒后再来。</div>`;
+    } else {
+      h += `<div class="ty-line job-tip">工资按雇主身家的比例结算，职级越高拿得越多，但冷却也更久。</div>`;
+    }
+    if (S.rise && S.rise.length) {
+      h += `<div class="ty-line job-tip rise-tip">💡 你有 ${S.rise.length} 个翻身任务：在「每日任务」里真的下单买、平仓、签到都能拿钱。</div>`;
+    }
+    box.innerHTML = h;
+    var btn = $("btnJob");
+    if (btn) {
+      btn.classList.toggle("done", !!st.full);
+      btn.textContent = st.full ? "今天已经打工挣满了" : (st.wait > 0 ? ("冷却中 · 还剩 " + st.wait + " 秒") : "现在去打一份工");
+    }
   }
 
   /* 事件绑定 */

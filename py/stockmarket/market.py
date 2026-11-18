@@ -517,6 +517,42 @@ def job_cap_by_tier(cfg, equity):
     return float(cfg.get("job_daily_cap", 160.0))
 
 
+def job_status(db, cfg, qq):
+    """打工面板状态：今天挣了多少、这一档的上限、还剩多少、职级与冷却。
+
+    【为什么要单独一个接口】v4.9 把打工日上限按档位拉开了，
+    但网页端还写着老文案「每天封顶 2000 元」，玩家看到的和实际算的对不上。
+    这里把真实上限直接算给前端，别再硬编码。
+    """
+    qq = str(qq)
+    acct = account(db, cfg, qq)
+    eq = float(acct["equity"]) if acct else 0.0
+    is_bankrupt = recovery.in_relief(db, qq)
+    tier_cap = job_cap_by_tier(cfg, eq)
+    cap = float(cfg.get("bankrupt_job_cap", 1200.0)) if is_bankrupt else tier_cap
+    earned = job_today_income(db, qq)
+    lv_name, mult, cooldown = job_level(acct["jobs"] if acct else 0)[1:]
+    if is_bankrupt:
+        cooldown = int(cooldown * 0.6)
+    last = int(acct["last_job"] or 0) if acct else 0
+    wait = 0
+    if last and now() - last < cooldown:
+        wait = cooldown - (now() - last)
+    return {
+        "earned": round(earned, 2),
+        "cap": round(cap, 2),
+        "left": round(max(0.0, cap - earned), 2),
+        "tier": tiers.tier_name(eq),
+        "tier_cap": round(tier_cap, 2),
+        "bankrupt": bool(is_bankrupt),
+        "level": lv_name,
+        "cooldown": int(cooldown),
+        "wait": int(wait),
+        "ready": wait <= 0,
+        "full": earned >= cap,
+    }
+
+
 def peek_news(db, cfg, qq):
     """花钱买「内幕消息」：提前知道下一条快讯的标的和方向。"""
     qq = str(qq)
