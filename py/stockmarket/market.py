@@ -136,6 +136,12 @@ def add_notice(db, qq, kind, text):
     try:
         db.ex("INSERT INTO notices(qq,kind,text,ts) VALUES(?,?,?,?)",
               (str(qq), kind, text, now()))
+        # 每个用户只留最近 30 条。
+        # 风险预警 15 分钟一条，玩家要是长期贴着强平线，
+        # notices 表会一直涨（一个群几千号人就是几万行）。
+        db.ex("DELETE FROM notices WHERE qq=? AND id NOT IN "
+              "(SELECT id FROM notices WHERE qq=? ORDER BY id DESC LIMIT 30)",
+              (str(qq), str(qq)))
     except Exception:
         return ""
     return text
