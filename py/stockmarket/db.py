@@ -327,7 +327,11 @@ class GroupDB:
     def __init__(self, path):
         self.path = path
         self.lock = threading.RLock()
-        self._depth = 0
+        # batch 深度必须是**线程本地**的。
+        # 用实例属性的话，调度器线程开着 batch（深度 1）时，
+        # 网页线程来写数据就会误以为「还在 batch 里」而不提交，
+        # 那笔订单要等下一次 tick 才落库 —— 玩家会看到「下单了但没成交」。
+        self._tls = threading.local()
         parent = os.path.dirname(path)
         if parent:
             os.makedirs(parent, exist_ok=True)
@@ -426,14 +430,14 @@ class GroupDB:
     def ex(self, sql, args=()):
         with self.lock:
             cur = self.conn.execute(sql, args)
-            if self._depth <= 0:
+            if getattr(self._tls, "depth", 0) <= 0:
                 self.conn.commit()
             return cur
 
     def exmany(self, sql, seq):
         with self.lock:
             cur = self.conn.executemany(sql, seq)
-            if self._depth <= 0:
+            if getattr(self._tls, "depth", 0) <= 0:
                 self.conn.commit()
             return cur
 
@@ -451,14 +455,15 @@ class GroupDB:
         缩短，网页基本感觉不到 tick 的存在。
         """
         with self.lock:
-            self._depth += 1
+            depth = getattr(self._tls, "depth", 0)
+            self._tls.depth = depth + 1
             ok = False
             try:
                 yield self
                 ok = True
             finally:
-                self._depth -= 1
-                if self._depth == 0:
+                self._tls.depth = depth
+                if depth == 0:
                     if ok:
                         self.conn.commit()
                     else:
