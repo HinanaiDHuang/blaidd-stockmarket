@@ -976,6 +976,28 @@
     $("calc").innerHTML = "预计保证金 <b>" + fmt(margin) + "</b>　手续费 " + fmt(fee) +
       "　涨跌 1% ≈ <b class=\"" + (S.side === "long" ? "up" : "down") + "\">" +
       (S.side === "long" ? "+" : "-") + fmt(p1) + "</b>";
+    renderCoolTax();
+  }
+
+  /* 短线交易费（冷却税）：持仓越短，手续费倍数越高。
+     真实市场对高频短线本来就有额外成本（A 股 T+1、券商委托频率上限、
+     程序化交易差异化收费、交易所异常交易监控），这里做成看得见的阶梯。 */
+  function renderCoolTax() {
+    var el = $("calcTax");
+    if (!el) return;
+    var lad = (S.cfg && S.cfg.cooldown_fee_ladder) || [];
+    if (!lad.length) { el.textContent = ""; el.hidden = true; return; }
+    var parts = [];
+    for (var i = 0; i < lad.length; i++) {
+      var sec = Number(lad[i][0]) || 0;
+      var m = Number(lad[i][1]) || 1;
+      var label = sec >= 3600 ? Math.round(sec / 3600) + " 小时"
+                : (sec >= 60 ? Math.round(sec / 60) + " 分钟" : sec + " 秒");
+      parts.push(label + "内 ×" + m);
+    }
+    el.innerHTML = "短线交易费：平仓时按持仓时长加收 —— " + parts.join(" / ") +
+      "。持满 30 分钟以上免收。";
+    el.hidden = false;
   }
 
   function renderAll() {

@@ -179,9 +179,24 @@ def on_bankrupt(db, cfg, qq):
     db.ex("UPDATE users SET bankrupt_earn=0, relief_tier=0, bankrupt_ts=?, "
           "bankrupt_since=CASE WHEN bankrupt_since>0 THEN bankrupt_since ELSE ? END "
           "WHERE qq=?", (now(), now(), qq))
+    # 【v4.12】重开期标记以前是死代码 —— mark_reopen() 全仓只有定义、
+    # 没有任何调用点，所以「破产清盘后不能贷款、杠杆最多 1 倍」这条
+    # v4.6 就写好的规则从来没真正生效过。现在在这里接上：
+    # 宣告破产 = 被强制清盘，清完之后给一个冷静期重新做人。
+    # 已经在重开期里就别再往后推 —— 否则反复破产能把冷静期无限延长。
+    reopen_txt = ""
+    if not in_reopen(db, qq):
+        try:
+            days = int(cfg.get("reopen_days", 10))
+        except (TypeError, ValueError):
+            days = 10
+        if days > 0:
+            mark_reopen(db, cfg, qq, days)
+            reopen_txt = ("\n重开期 %d 天：这期间不能贷款、杠杆最多 1 倍，"
+                          "先靠打工和签到把本金挣回来。" % days)
     if cut > 0:
-        return "清算组帮你减免了 %.2f 元债务，剩余欠款 %.2f。" % (cut, loan - cut)
-    return "欠款 %.2f 仍要还。" % loan
+        return "清算组帮你减免了 %.2f 元债务，剩余欠款 %.2f。%s" % (cut, loan - cut, reopen_txt)
+    return "欠款 %.2f 仍要还。%s" % (loan, reopen_txt)
 
 
 def earn(db, cfg, qq, amount, note=""):

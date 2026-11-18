@@ -8,6 +8,7 @@ import math
 import os
 import random
 import time
+import zlib
 
 import db as dbmod
 from newsdata import (NEWS_TEMPLATES, BOMB_TEMPLATES, CAT_MARKS, CAT_ORDER,
@@ -242,6 +243,9 @@ class Engine:
         push_rate, push_ticks = self._push_window()
         drift_scale = self._num("drift_scale", 0.0)
         ticks_per_day = 86400.0 / max(0.5, self._num("tick_seconds", 2.0))
+        # 锚点周期号：这一轮 tick 里所有票共用同一个锚点周期，
+        # 回归强度系数要按「票 + 周期」取，整轮只查一次库就够了。
+        anchor_cycle = self._anchor_cycle()
 
         for r in rows:
             # 个股自己的日漂移不在这里逐 tick 累加：
@@ -290,7 +294,7 @@ class Engine:
             # 没有任何系统性偏置，波动再大也不漏血。
             pull = 0.0
             if rev > 0 and anchor > 0:
-                pull = rev * (anchor - r["price"])
+                pull = rev * self._rev_strength(r["id"], anchor_cycle) * (anchor - r["price"])
             ret = raw_ret
             if diag_on:
                 _ENGINE_ACC["rev"] += pull / max(1e-9, r["price"])
@@ -431,6 +435,68 @@ class Engine:
             {"mood": float(mood), "until": until, "label": label}, ensure_ascii=False))
         return label
 
+    # ---------------------------------------------------------------- 锚点
+    def _anchor_cycle(self):
+        """当前锚点周期号（锚点上次刷新的时间戳）。"""
+        try:
+            return str(self.db.get_meta("anchor_ts", "0") or "0")
+        except Exception:
+            return "0"
+
+    def _seed_of(self, tag, cid, cycle):
+        """稳定的伪随机种子。
+
+        【为什么用 zlib.crc32 而不是内置 hash】Python 的 str hash 默认
+        按进程随机化（PYTHONHASHSEED），同一个 (票, 周期) 在不同进程
+        会算出不同的系数 —— 行情重启一次，整场市场的性格就变了，
+        还没法复现问题。crc32 是纯函数，跨进程、跨机器都一样。
+
+        【为什么要加盐】光靠 (票, 周期) 做种子还不够 —— 这两个值都能被
+        外部推算出来（票 id 是接口里公开的，周期号就是锚点刷新时间戳）。
+        那样的话 anybody 拿到这份代码就能反推出每只票的锚点偏移量，
+        「等价格跌回锚点」又变回一个确定性事件，等于把随机化白做了。
+        所以这里再掺一个**只有服务端知道的盐**（secrets.json 的 secret，
+        不入仓、不随配置同步），外部就算知道票和周期也算不出锚点在哪。
+        """
+        salt = ""
+        try:
+            salt = str(self.cfg.get("secret") or "")
+        except Exception:
+            salt = ""
+        if not salt:
+            salt = "dev-salt"      # 测试 / 无密钥环境：可复现即可
+        return zlib.crc32(("%s|%s|%s|%s" % (salt, tag, cid, cycle)).encode("utf-8")) & 0xFFFFFFFF
+
+    def _rev_strength(self, cid, cycle):
+        """每只票在每个锚点周期的随机回归强度系数（默认 1.0）。
+
+        【为什么要随机】锚点回归如果对所有票、所有周期都是同一个系数，
+        它就是一条可以被精确拟合的确定性规则。实测有玩家只靠
+        「价格偏离锚价 0.4% 就做空、跌回锚价就平」这一条稳定赚
+        +20%/笔的保证金收益（20 倍杠杆下每笔赚 20% 本金）。
+        这里给每票每周期一个 1-j ~ 1+j 的随机系数，长期期望仍是 1.0
+        （不改变行情的中长期性质），但没法用一套固定参数通吃。
+        """
+        j = self._num("rev_strength_jitter", 0.0)
+        if j <= 0:
+            return 1.0
+        r = (self._seed_of("rev", cid, cycle) % 100000) / 100000.0
+        return 1.0 - j + 2.0 * j * r
+
+    def _anchor_jitter(self, cid, cycle):
+        """锚点的随机微偏移（±anchor_jitter_pct，默认 0）。
+
+        【为什么】锚点如果是「N 分钟前的价格」的精确快照，它就落在某个
+        真实成交价上 —— 玩家可以照着它挂单等它被触及，套利就变成
+        确定性事件。加一点随机偏移之后，锚点不再对齐任何真实价位，
+        「等价格跌回锚点」变成概率事件而不是必然事件。
+        """
+        p = self._num("anchor_jitter_pct", 0.0)
+        if p <= 0:
+            return 0.0
+        r = (self._seed_of("jit", cid, cycle) % 100000) / 100000.0
+        return (r * 2.0 - 1.0) * p
+
     def _refresh_anchors(self):
         """每 anchor_refresh_seconds 秒把锚价挪到现价。
 
@@ -456,10 +522,22 @@ class Engine:
         # 完全跟随的问题是：任何下跌都是永久的（锚点跟着跌，回归拉不回来），
         # 线上因此出现过单日 -90% 的暴跌。
         follow = self._num("anchor_follow", 1.0)
-        if follow >= 0.999:
-            self.db.ex("UPDATE companies SET anchor=price")
+        jit = self._num("anchor_jitter_pct", 0.0)
+        if jit <= 0:
+            if follow >= 0.999:
+                self.db.ex("UPDATE companies SET anchor=price")
+            else:
+                self.db.ex("UPDATE companies SET anchor = anchor + ? * (price - anchor)", (follow,))
         else:
-            self.db.ex("UPDATE companies SET anchor = anchor + ? * (price - anchor)", (follow,))
+            # 带随机偏移时必须逐票算（每票偏移不同），一条 SQL 刷不了。
+            cycle = str(ts)
+            for r in self.db.q("SELECT id, price FROM companies"):
+                tgt = float(r["price"]) * (1.0 + self._anchor_jitter(r["id"], cycle))
+                if follow >= 0.999:
+                    self.db.ex("UPDATE companies SET anchor=? WHERE id=?", (tgt, r["id"]))
+                else:
+                    self.db.ex("UPDATE companies SET anchor = anchor + ? * (? - anchor) WHERE id=?",
+                               (follow, tgt, r["id"]))
         self._prune_candles()
 
     def _prune_candles(self):

@@ -50,8 +50,8 @@
   "push_brief_minute": 5,
   "push_close_hour": 15,
   "push_close_minute": 5,
-  "reversion": 0.0012,
-  "anchor_refresh_seconds": 1800,
+  "reversion": 0.0006,
+  "anchor_refresh_seconds": 300,
   "candle_keep": 2000,
   "vol_scale": 0.095,
   "drift_scale": 0.003,
@@ -125,5 +125,9 @@
   "dividend_daily_cap": 8000,
   "dividend_pool_seed": 8000,
   "dividend_print_cap": 20000,
-  "liquidation_auto_days": 3
+  "liquidation_auto_days": 3,
+  "anchor_jitter_pct": 0.0015,
+  "rev_strength_jitter": 0.5,
+  "cooldown_fee_ladder": [[120, 5.0], [600, 2.5], [1800, 1.5]],
+  "reopen_days": 10
 }

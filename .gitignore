@@ -15,6 +15,9 @@ tests/g_*.db
 tests/*.err
 tests/*.out
 
+# ---- 一次性探针脚本（临时测量用，测完不入库）----
+tests/_probe_*.py
+
 # ---- runtime data ----
 py/stockmarket/data/
 py/stockmarket/g_*.db

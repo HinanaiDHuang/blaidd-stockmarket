@@ -1162,6 +1162,7 @@ def api_state():
             "price_limit": CFG.get("price_limit", 0.1),
             "rename_cost": CFG.get("rename_cost", 3000),
             "sabotage_daily_limit": CFG.get("sabotage_daily_limit", 2),
+            "cooldown_fee_ladder": CFG.get("cooldown_fee_ladder", []),
         },
     }
     if cid:

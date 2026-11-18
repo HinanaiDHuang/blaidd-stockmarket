@@ -41,6 +41,44 @@ def px(v):
         return round(v, 3)
     return round(v, 2)
 
+# ---------------------------------------------------------------- 短周期冷却税
+def cooldown_mult(cfg, hold_seconds):
+    """短周期交易冷却税：持仓越短，手续费倍数越高。返回倍率（>=1.0）。
+
+    【现实依据 —— 真实市场确实对「短线高频」有额外成本】
+      1. A 股 T+1：当天买入的股票当天不能卖，最短持仓 = 1 个交易日，
+         想当天来回就必须承担隔夜风险 —— 这里的 tick 是 2 秒，照搬 T+1
+         太狠，改成「按持仓时长阶梯加收手续费」；
+      2. 券商 API 委托频率上限：柜台 CTP 约 300 笔/秒，个人 API 常见
+         1~3 笔/秒，且多数券商对「频繁申报」有权加收费用或限流；
+      3. 程序化交易报告制度 + 高频差异化收费：交易所与券商对高频、
+         抢单、频繁报撤单的行为额外收费；
+      4. 交易所「异常交易 / 拉抬打压」监控：短时间内大量反复申报会被
+         重点监控，费用与限制都会变严。
+
+    【为什么要按「名义金额」收】
+    手续费是按成交额算的，所以 20 倍杠杆下 x5 相当于吃掉 20% 的保证金，
+    而 1 倍仓只多付 0.8% —— 成本天然精准打击高杠杆短线，
+    对认真做中长线的散户几乎无感。
+
+    【阶梯表】cfg["cooldown_fee_ladder"]，格式 [[持仓秒数上限, 倍率], ...]，
+    按上限升序排列；第一个满足 hold < 上限 的生效。默认无税（返回 1.0）。
+    """
+    try:
+        ladder = cfg.get("cooldown_fee_ladder") or []
+    except AttributeError:
+        ladder = []
+    for row in ladder:
+        try:
+            lim = float(row[0])
+            mult = float(row[1])
+        except (TypeError, ValueError, IndexError, KeyError):
+            continue
+        if hold_seconds < lim:
+            return max(1.0, mult)
+    return 1.0
+
+
 def day_start(now_ts=None):
     """今天 0 点的时间戳（本地时区）。"""
     t = time.localtime(now_ts if now_ts is not None else now())
@@ -309,7 +347,14 @@ def close_position(db, cfg, qq, pos_id, force=False, qty=None):
     # 【v4.7】高档位手续费折扣（开仓 / 平仓都算）
     _acct = account(db, cfg, qq)
     disc = tiers.fee_discount(_acct["equity"]) if _acct else 0.0
-    fee = qty * price * cfg["fee_rate"] * (1.0 - disc) * (2 if force else 1)
+    # 【v4.12】短周期交易冷却税：持仓越短，手续费越高。
+    # 强平不收 —— 被强平不是玩家自己选的短线交易，不该再罚一次。
+    try:
+        hold = max(0.0, float(now()) - float(p["opened_at"] or now()))
+    except (TypeError, ValueError):
+        hold = 0.0
+    cd_mult = 1.0 if force else cooldown_mult(cfg, hold)
+    fee = qty * price * cfg["fee_rate"] * (1.0 - disc) * (2 if force else 1) * cd_mult
     if not force and coupons.use(db, qq, "fee_free", 1):
         fee = 0.0
     margin_out = p["margin"] * part
@@ -341,7 +386,9 @@ def close_position(db, cfg, qq, pos_id, force=False, qty=None):
     _ledger(db, qq, cash_delta, ("强制平仓 " if force else "平仓 ") + comp["name"])
     tag = "强平" if force else "平仓"
     left = "" if qty >= total - 1e-9 else "（剩余 %.0f 股）" % (total - qty)
-    return True, "%s%s%s，盈亏 %.2f（含手续费 %.2f）" % (tag, comp["name"], left, pl - fee, fee), {
+    tax_note = ("，其中短线交易费 x%.1f" % cd_mult) if cd_mult > 1.0 else ""
+    return True, "%s%s%s，盈亏 %.2f（含手续费 %.2f%s）" % (
+        tag, comp["name"], left, pl - fee, fee, tax_note), {
         "pl": round(pl - fee, 2)}
 
 
@@ -482,15 +529,29 @@ def borrow(db, cfg, qq, amount):
     user = ensure_user(db, qq, "", cfg["initial_cash"])
     if user["bankrupt"]:
         if not recovery.sync_bankrupt(db, cfg, qq):
-            return False, "破产状态下不能贷款，先去打工翻身", None
+            return False, ("资不抵债（净值 <= 0），借贷通道已关闭 —— 先去打工/签到翻身。"
+                           "（顺带提醒：现金花光不等于不能借，只要净值还是正的就照样能借。）"), None
         user = db.q1("SELECT * FROM users WHERE qq=?", (qq,))
     # 【v4.6】重开期不许借钱 —— 刚被交易所救回来，别转头又借一屁股债梭哈。
     if recovery.in_reopen(db, qq):
         return False, ("重开期（还剩 %d 天）不能贷款 —— 先用自己的本金把窟窿填上"
                        % recovery.reopen_days_left(db, qq)), None
+    # 【v4.12】纾困 / 司法重整期间不许新增贷款。
+    # 【为什么必须补这一条】mark_reopen() 以前是死代码（全仓只有定义、
+    # 没有任何调用点），所以「重开期禁贷」一直只是纸面规则。真正能走的
+    # 刷钱路径是：
+    #   破产清算减免 75% 债务 → 净值回正 → sync_bankrupt 解除破产标记
+    #   → 此时 in_reopen 恒为 False → borrow 放行 → 借到 净值×3
+    #   → 打工攒够 3 万触发司法重整（余债一笔勾销）→ 现金白拿
+    #   → 再破产再刷，每轮约 3 倍膨胀。
+    # 现在只要还在纾困流程里（还欠着债、司法重整没走完），就断掉新增贷款。
+    if recovery.in_relief(db, qq):
+        return False, ("纾困/司法重整期间不能新增贷款 —— 先靠打工和签到把窟窿填上，"
+                       "走完重整流程之后才恢复借款"), None
     acct = account(db, cfg, qq)
     if acct["equity"] <= 0:
-        return False, "净值已经是负数了，先去打工翻身再来借钱", None
+        return False, ("净值已经 <= 0（资不抵债），借贷通道已关闭 —— 先去打工翻身。"
+                       "（顺带提醒：现金花光不等于不能借，只要净值还是正的就照样能借。）"), None
     try:
         amount = float(amount)
     except (TypeError, ValueError):
