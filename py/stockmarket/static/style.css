@@ -7,6 +7,13 @@
 html,body{margin:0;padding:0;background:var(--bg);color:var(--txt);overflow-x:hidden;
   font-family:-apple-system,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
   -webkit-text-size-adjust:100%}
+/* 【为什么这里要 clip】overflow-x:hidden 会把元素变成滚动容器，
+   于是 body 里的 position:sticky 全部失效 —— 标签栏「吸顶」从来就没生效过，
+   群友想换个页还得先滚回顶部。overflow-x:clip 一样能挡住横向滚动条，
+   但不会造滚动容器，sticky 就能用了。老浏览器不支持 clip，保持原样即可。 */
+@supports (overflow-x:clip){
+  html,body{overflow-x:clip}
+}
 #app{max-width:720px;margin:0 auto;
   padding-bottom:calc(28px + env(safe-area-inset-bottom))}
 
@@ -17,7 +24,7 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--txt);overflow-x:hi
 [hidden]{display:none!important}
 
 /* ---------------- 顶栏 ---------------- */
-.topbar{position:sticky;top:0;z-index:20;background:linear-gradient(180deg,#0d1117 70%,rgba(13,17,23,.92));
+.topbar{position:relative;z-index:20;background:linear-gradient(180deg,#0d1117 70%,rgba(13,17,23,.92));
   border-bottom:1px solid var(--line);padding:12px 14px 10px}
 .brand{display:flex;align-items:center;gap:8px;font-size:15px;font-weight:600}
 .logo{font-size:18px}
@@ -37,12 +44,42 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--txt);overflow-x:hi
 @keyframes circuitPulse{0%,100%{opacity:1}50%{opacity:.62}}
 
 /* ---------------- 分段标签 ---------------- */
-.tabs{display:flex;gap:6px;padding:12px 14px 8px;position:sticky;top:78px;z-index:19;background:var(--bg)}
+/* 标签栏 + 换群条合成一个吸顶容器：滚到哪儿都能换页、换群，
+   又不像整个顶栏那样一直占着屏幕（顶栏有净值四格，太占地方）。 */
+.tabwrap{position:sticky;top:0;z-index:19;background:var(--bg)}
+.tabs{display:flex;gap:6px;padding:12px 14px 8px}
 .tab{flex:1;padding:9px 0;font-size:13.5px;border:1px solid var(--line);border-radius:9px;
   background:var(--bg2);color:var(--dim)}
 .tab.active{background:#21262d;color:var(--txt);border-color:#30363d;font-weight:600}
 .pane{display:none;padding:0 14px}
 .pane.active{display:block}
+
+/* ---------------- 换群 ---------------- */
+.groupbar{padding:8px 14px 0}
+.group-btn{width:100%;display:flex;align-items:center;gap:8px;padding:7px 10px;
+  background:var(--bg2);border:1px solid var(--line);border-radius:9px;
+  cursor:pointer;text-align:left}
+.group-btn:active{background:#1c2129;border-color:#30363d}
+.g-ico{font-size:14px;line-height:1;flex-shrink:0}
+.g-name{flex:1;min-width:0;font-size:13px;font-weight:600;color:var(--txt);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.g-gid{font-size:11px;color:var(--dim);font-variant-numeric:tabular-nums;flex-shrink:0}
+.g-caret{font-size:11px;color:var(--dim);flex-shrink:0}
+.grp-hint{font-size:11.5px;color:var(--dim);margin-bottom:10px;line-height:1.7}
+.group-item{display:flex;align-items:center;gap:10px;width:100%;padding:10px 12px;margin-bottom:8px;
+  background:#12171e;border:1px solid var(--line);border-radius:10px;
+  cursor:pointer;text-align:left}
+.group-item:active{background:#1a2029}
+.group-item.cur{border-color:#4a3a1c;background:#1d1a12}
+.group-item.loading{opacity:.5}
+.gi-main{flex:1;min-width:0}
+.gi-name{display:block;font-size:13.5px;font-weight:600;color:var(--txt);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gi-sub{display:block;font-size:11px;color:var(--dim);margin-top:2px;
+  font-variant-numeric:tabular-nums}
+.gi-badge{font-size:10.5px;color:var(--gold);border:1px solid #4a3a1c;border-radius:6px;
+  padding:1px 6px;flex-shrink:0}
+.gi-go{font-size:11.5px;color:var(--dim);flex-shrink:0}
 
 /* ---------------- 卡片 ---------------- */
 .chart-card,.order-card,.list-card{background:var(--bg2);border:1px solid var(--line);

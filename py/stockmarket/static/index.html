@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#0d1117">
 <title>布莱泽模拟炒股</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ctext y='26' font-size='26'%3E%F0%9F%93%88%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="/static/style.css?v=20261118h">
+<link rel="stylesheet" href="/static/style.css?v=20261118i">
 </head>
 <body>
 <div id="app">
@@ -25,6 +25,7 @@
       <div class="w-item"><span class="w-label">欠款</span><span class="w-val" id="wLoan">--</span></div>
       <div class="w-item"><span class="w-label">浮动</span><span class="w-val" id="wUnreal">--</span></div>
     </div>
+
   </header>
 
   <div class="bankrupt" id="bankruptBar" hidden>
@@ -39,13 +40,25 @@
 
   <div class="market-bar" id="marketBar" hidden></div>
 
-  <nav class="tabs">
-    <button class="tab active" data-tab="market">行情</button>
-    <button class="tab" data-tab="positions">交易</button>
-    <button class="tab" data-tab="news">资讯</button>
-    <button class="tab" data-tab="rank">排行</button>
-    <button class="tab" data-tab="me">我的</button>
-  </nav>
+  <!-- 标签栏 + 换群条一起吸顶：滚到哪儿都能换页、换群 -->
+  <div class="tabwrap">
+    <!-- 换群：只在「你在一个以上群有账户」时出现，单群用户看不到这一行 -->
+    <div class="groupbar" id="groupBar" hidden>
+      <button class="group-btn" id="btnGroup" type="button" title="切换到你在别的群的账户">
+        <span class="g-ico">🏛</span>
+        <span class="g-name" id="gName">--</span>
+        <span class="g-gid" id="gGid">--</span>
+        <span class="g-caret">▾</span>
+      </button>
+    </div>
+    <nav class="tabs">
+      <button class="tab active" data-tab="market">行情</button>
+      <button class="tab" data-tab="positions">交易</button>
+      <button class="tab" data-tab="news">资讯</button>
+      <button class="tab" data-tab="rank">排行</button>
+      <button class="tab" data-tab="me">我的</button>
+    </nav>
+  </div>
 
 <section class="pane active" id="pane-market">
     <div class="chart-card">
@@ -410,8 +423,18 @@
     </div>
   </div>
 
+  <div class="modal" id="grpModal" hidden>
+    <div class="modal-card">
+      <div class="modal-head">
+        <span>🏛 切换群账户</span>
+        <button class="mini-btn" id="btnGrpClose" type="button">关闭</button>
+      </div>
+      <div class="modal-body" id="grpBody"><div class="empty">加载中…</div></div>
+    </div>
+  </div>
+
   <div class="toast" id="toast" hidden></div>
 </div>
-<script src="/static/app.js?v=20261118h"></script>
+<script src="/static/app.js?v=20261118i"></script>
 </body>
 </html>

@@ -107,6 +107,16 @@ TOKEN_TTL = 60 * 60 * 24 * int(CFG.get("token_ttl_days", 7))
 # 主人明说不要在群里发公告，那就把变更说清楚放网页上。
 CHANGELOG = [
     {
+        "ver": "v4.9.5",
+        "date": "2026-11-18",
+        "title": "网页上能换群了",
+        "items": [
+            "同时在好几个群玩的人，网页上多一条「换群」：点一下就切到另一个群的账户（钱、持仓、榜单各算各的）",
+            "只在一个群玩的人看不到这一行，不占地方",
+            "标签栏会吸顶了，滚到哪儿都能换页（以前得先滚回顶部）",
+        ],
+    },
+    {
         "ver": "v4.9.4",
         "date": "2026-11-18",
         "title": "私聊认群不再被人改判",
@@ -380,6 +390,97 @@ def _remember_members(gid, members):
             rows)
     except Exception as exc:
         print("[stockmarket] registry bulk update failed: %s" % exc)
+
+
+# ---------------------------------------------------------------- 换群（多群用户）
+# 一个 QQ 常常同时在好几个群里炒股。以前网页只能认链接里那一个群，
+# 想看另一个群的账户只能回群里再发一次「炒股」拿新链接 —— 很别扭。
+# 这里给他一个「换群」下拉：在网页上点一下，服务端给他签一个目标群的新令牌。
+#
+# 【授权边界】只允许切到「这个 QQ 在那个群本来就有账户」的群。
+# 注册制的语义是：群里任意一人发过一次「炒股」，全群成员就算在这个群注册过
+# （Lua 把成员名单报上来，服务端逐个开户），所以「某群 users 表里有他一行」
+# 就等于「他是这个群的注册用户」。而这些人本来就在群里、发一句「炒股」
+# 就能自己拿到该群的链接和令牌 —— 按账户授权不构成提权；
+# 反过来，没有账户的群一律不给换。
+
+def _group_name(gid):
+    """群名（只读缓存）。拿不到就返回空串，前端退回显示群号。
+
+    【为什么不现取】群名要走一次 OneBot 往返，网络慢的时候能把网页请求
+    拖住好几秒，而且第一个点开下拉的人要替所有人挨这一下。
+    改成后台慢慢拉（见 _refresh_group_names），请求里只读缓存。
+    """
+    gid = str(gid).strip()
+    if not gid:
+        return ""
+    try:
+        row = dbmod.get_registry(DATA_DIR).q1(
+            "SELECT value FROM meta WHERE key=?", ("gname_%s" % gid,))
+        if row and row["value"]:
+            parts = row["value"].split("|", 1)
+            if len(parts) == 2:
+                return parts[1]
+    except Exception:
+        pass
+    return ""
+
+
+def _refresh_group_names():
+    """后台把群名拉一遍（OneBot 的 get_group_info），写进登记表缓存。
+
+    群名会变（改名、退群），所以每半小时刷一次；拉失败就保留旧名，
+    实在没有就显示群号 —— 群名只是好看，功能不靠它。
+    """
+    gids = dbmod.known_groups(DATA_DIR)
+    if not gids:
+        return
+    # 服务刚起来时推送通道还在握手，等它连上再问
+    for _ in range(20):
+        if PUSHER.connected:
+            break
+        time.sleep(1)
+    got = 0
+    for gid in gids:
+        try:
+            if not gid.isdigit() or not PUSHER.connected:
+                continue
+            resp = PUSHER.bot.call("get_group_info", {"group_id": int(gid)}, timeout=4)
+            data = (resp or {}).get("data") or {}
+            name = str(data.get("group_name") or "").strip()
+            if not name:
+                continue
+            dbmod.get_registry(DATA_DIR).set_meta(
+                "gname_%s" % gid, "%d|%s" % (int(time.time()), name))
+            got += 1
+        except Exception:
+            continue
+    print("[stockmarket] group names refreshed: %d/%d" % (got, len(gids)), flush=True)
+
+
+def _group_name_loop():
+    while True:
+        try:
+            _refresh_group_names()
+        except Exception as exc:
+            print("[stockmarket] group name refresh error:", exc, flush=True)
+        time.sleep(1800)
+
+
+def _user_groups(uid):
+    """这个 QQ 在哪些群已经开户（= 在那些群注册过）。"""
+    uid = str(uid).strip()
+    if not uid:
+        return []
+    out = []
+    for gid in dbmod.known_groups(DATA_DIR):
+        try:
+            handle = dbmod.get_db(DATA_DIR, gid)
+            if handle.q1("SELECT 1 FROM users WHERE qq=? LIMIT 1", (uid,)):
+                out.append(gid)
+        except Exception:
+            continue
+    return out
 
 
 # ---------------------------------------------------------------- 限流
@@ -820,6 +921,54 @@ def api_passcode_set():
         return fail("口令长度要 4~32 位")
     _pwd_put(uid, pwd, 0)
     return ok({"u": uid, "set": True})
+
+
+@app.route("/api/g/mygroups", methods=["GET", "POST"])
+def api_my_groups():
+    """我在哪些群有账户 —— 网页端「换群」下拉用。"""
+    gid = request.args.get("g", "")
+    uid = request.args.get("u", "")
+    token = request.args.get("t", "")
+    if request.method == "POST":
+        j = request.get_json(silent=True) or {}
+        gid = j.get("g", gid) or gid
+        uid = j.get("u", uid) or uid
+        token = j.get("t", token) or token
+    handle, uid, err = get_ctx(gid, uid, token)
+    if err:
+        return err
+    cur = str(gid).strip()
+    groups = _user_groups(uid)
+    if cur and cur not in groups:
+        groups = [cur] + groups
+    items = [{"gid": g, "name": _group_name(g), "cur": g == cur} for g in groups]
+    return ok({"groups": items, "cur": cur, "count": len(items)})
+
+
+@app.route("/api/g/switch", methods=["POST"])
+def api_switch_group():
+    """换到我在另一个群的账户：给他签一个目标群的新令牌。"""
+    if not _rate_ok("switch", int(CFG.get("switch_rate_per_min", 60))):
+        return fail("切换太频繁，稍等一下再试", 429)
+    j = request.get_json(silent=True) or {}
+    handle, uid, err = get_ctx(j.get("g"), j.get("u"), j.get("t"))
+    if err:
+        return err
+    cur = str(j.get("g") or "").strip()
+    target = str(j.get("to") or "").strip()
+    if not target:
+        return fail("没指定要切到哪个群")
+    if target == cur:
+        # 切回当前群：原样把令牌还给他，别白白让他重新登录
+        tok = (request.headers.get("X-Token") or "").strip()
+        return ok({"g": cur, "u": uid, "t": tok, "same": True})
+    if target not in _user_groups(uid):
+        return fail("你在那个群还没有账户，先去群里发一次「炒股」", 403)
+    token = make_token(target, uid, LOGIN_TOKEN_TTL)
+    # 换群 = 明确切到那个群去玩了，私聊认群也跟着切过去，
+    # 免得他切了群又被旧群号拉回去。
+    _remember_group(uid, target)
+    return ok({"g": target, "u": uid, "t": token, "url": _public_url(target, uid, token)})
 
 
 @app.route("/api/summary")
@@ -2519,5 +2668,10 @@ if __name__ == "__main__":
     PUSHER.start()
     threading.Thread(target=scheduler, daemon=True).start()
     threading.Thread(target=push_loop, daemon=True).start()
+    PUSHER.start()
+    threading.Thread(target=scheduler, daemon=True).start()
+    threading.Thread(target=push_loop, daemon=True).start()
+    # 群名后台预取（网页端「换群」下拉要用）
+    threading.Thread(target=_group_name_loop, daemon=True).start()
     print("[stockmarket] listening on :%s  data=%s" % (CFG["port"], DATA_DIR), flush=True)
     app.run(host="0.0.0.0", port=CFG["port"], debug=False, threaded=True)

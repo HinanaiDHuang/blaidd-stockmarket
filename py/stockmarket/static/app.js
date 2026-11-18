@@ -126,7 +126,8 @@
     orders: [], coupons: [], vote: null, voteBoard: [], lottery: null, guess: null,
     recovery: null, tier: null, job: null, onboarding: null, quests: [], rise: [],
     rob: null, luxury: null, dividend: null, wealth: null,
-    openPanel: null, loaded: {}, msg: {}, changelog: null
+    openPanel: null, loaded: {}, msg: {}, changelog: null,
+    groups: [], switching: false
   };
 
   /* ---------------------------------------------------------- 工具 */
@@ -922,6 +923,17 @@
       if (sessionStorage.getItem(k)) {
         sessionStorage.removeItem(k);
         setTimeout(function () { toast("已更新到最新版本"); }, 800);
+      }
+    } catch (e) {}
+  })();
+
+  // 换群成功后整页重载，这里补一句「切到哪个群了」
+  (function () {
+    try {
+      var n = sessionStorage.getItem("sm_switch_notice");
+      if (n) {
+        sessionStorage.removeItem("sm_switch_notice");
+        setTimeout(function () { toast("已切到「" + n + "」"); }, 700);
       }
     } catch (e) {}
   })();
@@ -1959,10 +1971,110 @@
   }
   $("btnSetPwd").addEventListener("click", doSetPwd);
 
+  /* ---------------------------------------------------------- 换群 */
+  /* 一个 QQ 常常同时在好几个群里炒股。以前网页只认链接里那一个群，
+     想看另一个群的账户只能回群里再发一次「炒股」拿新链接，太绕。
+     现在服务端给一个「换群」下拉：点一下，签一个目标群的新令牌就行。
+     令牌是按「群 + 用户」签的，所以换群必须换令牌 —— 不能只改个群号糊弄过去。 */
+  function loadGroups() {
+    return get("/api/g/mygroups").then(function (d) {
+      S.groups = (d && d.groups) || [];
+      renderGroupBar();
+      return S.groups;
+    }).catch(function () {
+      S.groups = [];
+      renderGroupBar();
+      return [];
+    });
+  }
+
+  function currentGroup() {
+    for (var i = 0; i < S.groups.length; i++) {
+      if (S.groups[i] && S.groups[i].cur) return S.groups[i];
+    }
+    return null;
+  }
+
+  function renderGroupBar() {
+    var bar = $("groupBar");
+    if (!bar) return;
+    var cur = currentGroup();
+    if (!cur) { bar.hidden = true; return; }
+    var hasName = !!(cur.name && cur.name.length);
+    $("gName").textContent = hasName ? cur.name : ("群 " + cur.gid);
+    $("gGid").textContent = hasName ? cur.gid : "";
+    // 只有一个群就不显示了 —— 没必要占地方
+    bar.hidden = S.groups.length <= 1;
+  }
+
+  function renderGroupList() {
+    var box = $("grpBody");
+    if (!box) return;
+    if (!S.groups.length) {
+      box.innerHTML = '<div class="empty">没找到你在别的群的账户</div>';
+      return;
+    }
+    var h = '<div class="grp-hint">每个群的账户是独立的（钱、持仓、榜单各算各的）。' +
+            '点一下就切过去，这边会自动刷新。</div>';
+    for (var i = 0; i < S.groups.length; i++) {
+      var g = S.groups[i] || {};
+      h += '<button class="group-item' + (g.cur ? " cur" : "") + '" type="button" data-gid="' +
+           esc(g.gid) + '"><span class="gi-main"><span class="gi-name">' +
+           esc(g.name || ("群 " + g.gid)) + '</span><span class="gi-sub">' +
+           (g.name ? ("群号 " + esc(g.gid)) : "没取到群名，先用群号") + '</span></span>' +
+           (g.cur ? '<span class="gi-badge">当前</span>' : '<span class="gi-go">切换 ›</span>') +
+           '</button>';
+    }
+    box.innerHTML = h;
+  }
+
+  function doSwitch(gid, name) {
+    if (S.switching) return;
+    S.switching = true;
+    toast("正在切到「" + (name || gid) + "」…");
+    post("/api/g/switch", { to: gid }).then(function (d) {
+      if (!d || !d.t) throw new Error("切换失败");
+      try { sessionStorage.setItem("sm_switch_notice", name || gid); } catch (e) {}
+      G = d.g; U = d.u; T = d.t;
+      saveAuth({ g: G, u: U, t: T });
+      // 地址栏也换掉：群友把链接收藏/转发时，指向的还是这个群
+      try {
+        history.replaceState(null, "", location.pathname + "?g=" + encodeURIComponent(G) +
+          "&u=" + encodeURIComponent(U) + "#t=" + encodeURIComponent(T));
+      } catch (e) {}
+      location.reload();
+    }).catch(function (err) {
+      S.switching = false;
+      toast(friendlyErr(err));
+    });
+  }
+
+  $("btnGroup").addEventListener("click", function () {
+    var m = $("grpModal");
+    if (!m) return;
+    m.hidden = false;
+    renderGroupList();
+    loadGroups().then(renderGroupList);
+  });
+  $("btnGrpClose").addEventListener("click", function () { $("grpModal").hidden = true; });
+  $("grpModal").addEventListener("click", function (e) {
+    if (e.target === $("grpModal")) { $("grpModal").hidden = true; return; }
+    var btn = e.target.closest ? e.target.closest(".group-item") : null;
+    if (!btn) return;
+    var gid = btn.getAttribute("data-gid");
+    if (!gid || gid === G) { $("grpModal").hidden = true; return; }
+    var name = "";
+    for (var i = 0; i < S.groups.length; i++) {
+      if (S.groups[i] && S.groups[i].gid === gid) { name = S.groups[i].name; break; }
+    }
+    btn.classList.add("loading");
+    doSwitch(gid, name);
+  });
   /* ---------------------------------------------------------- 启动 */
   buildTools();
   resizeCanvas();
   $("btnPeek").textContent = "🔮 买内幕消息（" + (S.cfg.peek_cost || 800) + " 元）";
+  loadGroups();
   refreshState().then(function () {
     return refreshCandles();
   }).then(function () {
