@@ -286,7 +286,9 @@ REGISTRY_SCHEMA = """
 CREATE TABLE IF NOT EXISTS user_group(
     uid TEXT PRIMARY KEY,
     gid TEXT NOT NULL,
-    ts INTEGER NOT NULL
+    ts INTEGER NOT NULL,
+    self_gid TEXT,
+    self_ts INTEGER
 );
 
 -- v4.2 登录口令表。
@@ -492,9 +494,31 @@ def get_registry(data_dir):
         if db is None:
             db = GroupDB(path)
             db.conn.executescript(REGISTRY_SCHEMA)
+            _migrate_registry(db)
             db.conn.commit()
             _cache[path] = db
         return db
+
+
+def _migrate_registry(db):
+    """给跨群登记表补列：区分「本人操作过的群」和「被整群登记进来的群」。
+
+    【为什么要分两个】原来 user_group 一个 uid 只有一行、一个 gid，
+    而整群登记（群里任意一人发一次「炒股」，全群成员都登记进去）
+    是无差别覆盖的 —— 于是在 A、B 两个群都有账户的人，
+    会被「别人在另一个群发一次炒股」改判到那个群去。
+    self_gid / self_ts 只记本人真正操作过的群，认群时优先用它。
+    """
+    try:
+        cols = {r["name"] for r in db.q("PRAGMA table_info(user_group)")}
+        for col, decl in (("self_gid", "TEXT"), ("self_ts", "INTEGER")):
+            if col not in cols:
+                db.ex("ALTER TABLE user_group ADD COLUMN %s %s" % (col, decl))
+        # 存量数据：当前 gid 就是他被认回去的那个群，当成「本人操作过」，
+        # 这样上线后行为跟今天一致，不会突然把谁改判到别的群。
+        db.ex("UPDATE user_group SET self_gid=gid, self_ts=ts WHERE self_gid IS NULL")
+    except sqlite3.Error:
+        pass
 
 
 def known_groups(data_dir):
@@ -505,6 +529,12 @@ def known_groups(data_dir):
     for name in sorted(os.listdir(data_dir)):
         if name.startswith("g_") and name.endswith(".db"):
             gid = name[2:-3]
+            # 「0 号群」是老版本私聊 bug 的脏数据（把空串当群号造出来的假群）：
+            # 里面只有空账户、没有行情，但它躺在 data 目录里，
+            # known_groups 一扫就会把它当成一个真群 tick，白白耗资源，
+            # 还会让 /health 的群列表里一直挂个 "0"。直接不认。
+            if gid in ("", "0"):
+                continue
             out.append(gid)
     return out
 

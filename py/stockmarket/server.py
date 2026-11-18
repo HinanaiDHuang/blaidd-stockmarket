@@ -107,6 +107,15 @@ TOKEN_TTL = 60 * 60 * 24 * int(CFG.get("token_ttl_days", 7))
 # 主人明说不要在群里发公告，那就把变更说清楚放网页上。
 CHANGELOG = [
     {
+        "ver": "v4.9.4",
+        "date": "2026-11-18",
+        "title": "私聊认群不再被人改判",
+        "items": [
+            "同时在多个群玩的话，私聊发「炒股」认的是你自己最后动手的那个群，不会被别人发消息顶掉",
+            "「0 号群」这个老版本留下的假群清掉了（里面没有资产，只是空壳）",
+        ],
+    },
+    {
         "ver": "v4.9.3",
         "date": "2026-11-18",
         "title": "挥霍额度提前告诉你",
@@ -332,16 +341,22 @@ def _resolve_gid(gid, uid):
     uid = str(uid if uid is not None else "").strip()
     if not uid:
         return None
-    row = dbmod.get_registry(DATA_DIR).q1("SELECT gid FROM user_group WHERE uid=?", (uid,))
-    return row["gid"] if row else None
+    row = dbmod.get_registry(DATA_DIR).q1(
+        "SELECT gid, self_gid FROM user_group WHERE uid=?", (uid,))
+    if not row:
+        return None
+    # 优先认「本人操作过」的群。整群登记只是「记他在这个群待过」，
+    # 不该因为别人在另一个群发了消息就把他改判过去 —— 多群用户最常踩这个坑。
+    return row["self_gid"] or row["gid"]
 
 
 def _remember_group(uid, gid):
     """记一笔「这个 QQ 最近在哪个群炒股」，私聊时用来认群。"""
     dbmod.get_registry(DATA_DIR).ex(
-        "INSERT INTO user_group(uid, gid, ts) VALUES(?,?,?) "
-        "ON CONFLICT(uid) DO UPDATE SET gid=excluded.gid, ts=excluded.ts",
-        (str(uid), str(gid), int(time.time())))
+        "INSERT INTO user_group(uid, gid, ts, self_gid, self_ts) VALUES(?,?,?,?,?) "
+        "ON CONFLICT(uid) DO UPDATE SET gid=excluded.gid, ts=excluded.ts, "
+        "self_gid=excluded.self_gid, self_ts=excluded.self_ts",
+        (str(uid), str(gid), int(time.time()), str(gid), int(time.time())))
 
 
 def _remember_members(gid, members):
@@ -356,6 +371,9 @@ def _remember_members(gid, members):
     now_ts = int(time.time())
     rows = [(str(qq), str(gid), now_ts) for qq, _nick in members]
     try:
+        # 注意：这里只更新 gid/ts，不动 self_gid/self_ts ——
+        # 整群登记只是「记他在这个群待过」，不是「他自己在玩这个群」。
+        # 以前这里会把多群用户改判到别的群去（谁在另一个群发一次消息就改判谁）。
         dbmod.get_registry(DATA_DIR).exmany(
             "INSERT INTO user_group(uid, gid, ts) VALUES(?,?,?) "
             "ON CONFLICT(uid) DO UPDATE SET gid=excluded.gid, ts=excluded.ts",
