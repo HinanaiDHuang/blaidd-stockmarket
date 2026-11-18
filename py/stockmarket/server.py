@@ -2668,9 +2668,6 @@ if __name__ == "__main__":
     PUSHER.start()
     threading.Thread(target=scheduler, daemon=True).start()
     threading.Thread(target=push_loop, daemon=True).start()
-    PUSHER.start()
-    threading.Thread(target=scheduler, daemon=True).start()
-    threading.Thread(target=push_loop, daemon=True).start()
     # 群名后台预取（网页端「换群」下拉要用）
     threading.Thread(target=_group_name_loop, daemon=True).start()
     print("[stockmarket] listening on :%s  data=%s" % (CFG["port"], DATA_DIR), flush=True)
