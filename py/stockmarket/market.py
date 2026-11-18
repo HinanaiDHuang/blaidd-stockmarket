@@ -236,6 +236,13 @@ def close_position(db, cfg, qq, pos_id, force=False, qty=None):
           (cash_delta, max(pl, 0.0), max(-pl, 0.0), qq))
     if qty >= total - 1e-9:
         db.ex("UPDATE positions SET status='closed' WHERE id=?", (pos_id,))
+        # 这个方向上再没有仓位了 → 挂在它身上的止损/止盈一起作废（OCO）
+        still = db.q1("SELECT COUNT(*) c FROM positions "
+                      "WHERE qq=? AND cid=? AND side=? AND status='open'",
+                      (qq, p["cid"], p["side"]))
+        if not still or int(still["c"]) <= 0:
+            import orders
+            orders.cancel_protection(db, qq, p["cid"], p["side"])
     else:
         db.ex("UPDATE positions SET qty=?, margin=? WHERE id=?",
               (total - qty, p["margin"] - margin_out, pos_id))

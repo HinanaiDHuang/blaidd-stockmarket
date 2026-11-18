@@ -38,11 +38,62 @@ def _kind(key):
 
 def _side(key):
     s = str(key or "").strip().lower()
-    if s in ("long", "多", "做多", "buy", "买入"):
+    if s in ("long", "多", "做多", "多头", "多单", "buy", "买", "买入"):
         return "long"
-    if s in ("short", "空", "做空", "sell", "卖出"):
+    if s in ("short", "空", "做空", "空头", "空单", "sell", "卖", "卖出"):
         return "short"
     return None
+
+
+def _check_stop_price(kind, side, cur, price, qty, pos_qty):
+    """校验一张止损 / 止盈单：价格方向要对得上，数量不能离谱。
+    返回 (ok, 错误信息)。"""
+    ok, err = _px_dir_ok(kind, side, cur, price)
+    if not ok:
+        return False, err
+    return _qty_ok(qty, pos_qty)
+
+
+def _px_dir_ok(kind, side, cur, price):
+    """止损 / 止盈的价要跟持仓方向对得上：多头止损在下方、止盈在上方，空头反过来。"""
+    if price <= 0:
+        return False, "触发价不合法"
+    if side == "long":
+        if kind == "stop_loss" and price >= cur:
+            return False, "多头止损价要低于现价（现价 %.3f）" % cur
+        if kind == "take_profit" and price <= cur:
+            return False, "多头止盈价要高于现价（现价 %.3f）" % cur
+    else:
+        if kind == "stop_loss" and price <= cur:
+            return False, "空头止损价要高于现价（现价 %.3f）" % cur
+        if kind == "take_profit" and price >= cur:
+            return False, "空头止盈价要低于现价（现价 %.3f）" % cur
+    return True, ""
+
+
+def _qty_ok(qty, pos_qty):
+    """要平的股数：整数，且不能超过持仓。qty=0 表示全仓。"""
+    if qty > 0:
+        if qty != int(qty):
+            return False, "数量要整数股"
+        if qty > pos_qty:
+            return False, "你要平的 %g 股超过持仓 %g 股" % (qty, pos_qty)
+    return True, ""
+
+
+def _hold_sides(db, qq, cid):
+    """这个人在这只票上现在持有哪些方向。返回 {"long"} / {"short"} / 两者 / 空集。"""
+    rows = db.q("SELECT DISTINCT side FROM positions "
+                "WHERE qq=? AND cid=? AND status='open'", (str(qq), int(cid)))
+    return set(r["side"] for r in rows if r["side"] in ("long", "short"))
+
+
+def _pos_qty(db, qq, cid, side):
+    """某个方向上现在一共持有多少股。"""
+    row = db.q1("SELECT COALESCE(SUM(qty),0) q FROM positions "
+                "WHERE qq=? AND cid=? AND side=? AND status='open'",
+                (str(qq), int(cid), side))
+    return float(row["q"] or 0) if row else 0.0
 
 
 def active_count(db, qq):
@@ -51,13 +102,20 @@ def active_count(db, qq):
 
 
 def place(db, cfg, qq, cid, kind, side, trigger, qty=0, note=""):
-    """挂一张条件单。返回 (ok, msg, info)。"""
+    """挂一张条件单。返回 (ok, msg, info)。
+
+    side 传空串 / None = 不指定方向：
+      - 止损 / 止盈：按当前持仓自动推断（只有多头 / 只有空头都挂得上；
+        多空两头同时持有才要求显式指定）—— 对齐 MT4/MT5「SL/TP 挂在持仓上」的语义。
+      - 限价单是开仓单，必须显式给方向。
+    """
     qq = str(qq)
     kind = _kind(kind)
+    raw_side = "" if side is None else str(side).strip()
     side = _side(side)
     if kind is None:
         return False, "单子类型只能是止损、止盈或限价", None
-    if side is None:
+    if side is None and raw_side:
         return False, "方向只能是多或空", None
     comp = db.q1("SELECT * FROM companies WHERE id=?", (int(cid),))
     if comp is None:
@@ -71,6 +129,8 @@ def place(db, cfg, qq, cid, kind, side, trigger, qty=0, note=""):
         return False, "触发价不合法", None
     cur = float(comp["price"])
     if kind == "limit":
+        if side is None:
+            return False, "限价单要写方向（买 / 卖）", None
         if side == "long" and trigger > cur:
             return False, "买入限价要低于现价（现价 %.3f）" % cur, None
         if side == "short" and trigger < cur:
@@ -80,27 +140,39 @@ def place(db, cfg, qq, cid, kind, side, trigger, qty=0, note=""):
         if qty <= 0:
             return False, "限价单要写数量", None
     else:
-        # 止损/止盈要跟持仓方向对得上：多头止损在下方、止盈在上方，空头反过来
-        if side == "long":
-            if kind == "stop_loss" and trigger >= cur:
-                return False, "多头止损价要低于现价（现价 %.3f）" % cur, None
-            if kind == "take_profit" and trigger <= cur:
-                return False, "多头止盈价要高于现价（现价 %.3f）" % cur, None
-        else:
-            if kind == "stop_loss" and trigger <= cur:
-                return False, "空头止损价要高于现价（现价 %.3f）" % cur, None
-            if kind == "take_profit" and trigger >= cur:
-                return False, "空头止盈价要低于现价（现价 %.3f）" % cur, None
+        # 没写方向 → 看这个人在这只票上到底持着哪一边
+        if side is None:
+            sides = _hold_sides(db, qq, cid)
+            if not sides:
+                return False, "你并没有「%s」的持仓，先买入再挂止损止盈" % comp["name"], None
+            if len(sides) > 1:
+                return False, ("你「%s」多空两头都拿着，说清楚要保护哪一边"
+                               "（例：止损 %s 空 18.5）" % (comp["name"], comp["name"])), None
+            side = "long" if "long" in sides else "short"
         if qty < 0:
             return False, "数量不合法", None
         # 止损/止盈必须有对应的持仓才挂得上：没有仓位就永远等不到平仓，
         # 白占一个条件单名额，触发时还会被当成「仓位不在了」作废。
-        hold = db.q1("SELECT COUNT(*) c FROM positions "
-                     "WHERE qq=? AND cid=? AND side=? AND status='open'",
-                     (qq, int(cid), side))
-        if not hold or int(hold["c"]) <= 0:
+        pos_qty = _pos_qty(db, qq, cid, side)
+        if pos_qty <= 0:
             return False, "你并没有「%s」的%s，止损止盈挂不上去" % (
                 comp["name"], "多单" if side == "long" else "空单"), None
+        # 价格方向 + 数量一起验
+        dir_ok, dir_err = _px_dir_ok(kind, side, cur, trigger)
+        qty_ok, qty_err = _qty_ok(qty, pos_qty)
+        if dir_ok and qty_ok:
+            pass
+        elif not dir_ok and qty > 0:
+            # 价落在持仓的反面 —— 多半是「数量 价格」写反了，换个摆法再试一次
+            alt_ok, _ = _check_stop_price(kind, side, cur, qty, trigger, pos_qty)
+            if alt_ok:
+                trigger, qty = qty, trigger
+            else:
+                return False, dir_err, None
+        elif not dir_ok:
+            return False, dir_err, None
+        else:
+            return False, qty_err, None
     if active_count(db, qq) >= MAX_ACTIVE:
         return False, "你已经有 %d 张条件单了，先撤一张" % MAX_ACTIVE, None
     db.ex("INSERT INTO orders(qq,cid,kind,side,trigger,qty,status,created_at,note) "
@@ -111,8 +183,10 @@ def place(db, cfg, qq, cid, kind, side, trigger, qty=0, note=""):
         txt = "已挂限价单：%s %s %g 股 @ %g（到价自动成交）" % (
             name, "买入" if side == "long" else "卖出", qty, trigger)
     else:
-        txt = "已挂%s单：%s %s @ %g（到价自动平仓）" % (
-            KIND_NAMES[kind], name, "多单" if side == "long" else "空单", trigger)
+        scope = "全仓" if qty <= 0 else "平 %g 股" % qty
+        txt = "已挂%s单：%s %s @ %g（%s，到价自动平仓）" % (
+            KIND_NAMES[kind], name, "多单" if side == "long" else "空单",
+            trigger, scope)
     return True, txt, {"cid": int(cid), "kind": kind, "side": side,
                        "trigger": trigger, "qty": qty}
 
@@ -146,6 +220,26 @@ def cancel(db, qq, oid):
     cur = db.ex("UPDATE orders SET status='cancelled' WHERE id=? AND qq=? AND status='active'",
                 (int(oid), str(qq)))
     return cur.rowcount > 0
+
+
+def cancel_protection(db, qq, cid, side):
+    """仓位没了，挂在它上面的止损/止盈一起作废。
+
+    MT4/MT5 里 SL / TP 是绑在持仓上的一对（近似 OCO）：一边触发平仓，
+    另一边自动消失。咱们以前是两张独立单 —— 平完仓另一张还挂着占名额，
+    将来触发还会弹一句「仓位不在了」，纯粹添堵。
+    """
+    db.ex("UPDATE orders SET status='cancelled' WHERE qq=? AND cid=? AND side=? "
+          "AND status='active' AND kind IN ('stop_loss','take_profit')",
+          (str(qq), int(cid), side))
+
+
+def _prot_count(db, qq, cid, side):
+    """这个方向上还挂着几张止损/止盈。"""
+    row = db.q1("SELECT COUNT(*) c FROM orders WHERE qq=? AND cid=? AND side=? "
+                "AND status='active' AND kind IN ('stop_loss','take_profit')",
+                (str(qq), int(cid), side))
+    return int(row["c"]) if row else 0
 
 
 def _close_positions(db, cfg, qq, cid, side, qty):
@@ -206,6 +300,7 @@ def scan(db, cfg):
                                "kind": kind, "msg": "限价单成交：%s" % msg})
             continue
 
+        prot_before = _prot_count(db, qq, o["cid"], side)
         msgs, remain = _close_positions(db, cfg, qq, o["cid"], side, float(o["qty"] or 0))
         if not msgs:
             # 仓位早没了（手动平过）——单子作废
@@ -215,6 +310,8 @@ def scan(db, cfg):
                                name, KIND_NAMES.get(kind, ""))})
             continue
         tail = "（还剩 %g 股没平到）" % remain if remain > 0 else ""
+        if _prot_count(db, qq, o["cid"], side) < prot_before:
+            tail = tail + "（同方向另一张止损/止盈单已自动撤销）"
         events.append({"id": o["id"], "qq": qq, "cid": o["cid"], "name": name,
                        "kind": kind, "side": side,
                        "msg": "触发%s：%s %s%s" % (KIND_NAMES.get(kind, "条件单"), name,

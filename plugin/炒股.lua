@@ -872,6 +872,32 @@ local function split_words(s)
     return out
 end
 
+-- 方向词：止损 / 止盈可以显式说保护哪一边，不说就按持仓自动推断
+local SHORT_WORDS = {
+    ["空"] = true, ["做空"] = true, ["空头"] = true, ["空单"] = true,
+    ["卖"] = true, ["卖出"] = true, ["sell"] = true, ["short"] = true,
+}
+local LONG_WORDS = {
+    ["多"] = true, ["做多"] = true, ["多头"] = true, ["多单"] = true,
+    ["买"] = true, ["买入"] = true, ["buy"] = true, ["long"] = true,
+}
+
+local function dir_word(w)
+    if not w then return nil end
+    local t = string.lower(tostring(w))
+    if SHORT_WORDS[t] then return "short" end
+    if LONG_WORDS[t] then return "long" end
+    return nil
+end
+
+-- 「全仓」= 不写数量
+local ALL_WORDS = { ["全仓"] = true, ["全部"] = true, ["all"] = true }
+
+local function all_word(w)
+    if not w then return false end
+    return ALL_WORDS[string.lower(tostring(w))] == true
+end
+
 -- 我的条件单
 function stock_orders(msg)
     local qq = cur_qq_nick(msg)
@@ -896,18 +922,18 @@ function stock_orders(msg)
             it.id, it.kind_name or "", it.name or "", it.side_name or "",
             it.price or it.trigger or 0, extra, it.cur or 0))
     end
-    table.insert(lines, "用法：止损 股票名 价格　止盈 股票名 价格　限价 股票名 买/卖 价格 数量")
+    table.insert(lines, "用法：止损 股票名 [多/空] 价格 [数量]　止盈 股票名 [多/空] 价格 [数量]　限价 股票名 买/卖 价格 数量")
     table.insert(lines, "撤单发「撤单 编号」，编号就是上面的 #数字")
     return table.concat(lines, "\n")
 end
 
 -- 挂条件单（止损 / 止盈 / 限价共用）
-local function place_cond(msg, kind, default_side)
+local function place_cond(msg, kind)
     local qq, nick = cur_qq_nick(msg)
     local rest = string.match(msg.fromMsg or "", "^%s*[^%s]+%s+(.+)$") or ""
     rest = rest:gsub("^%s+", ""):gsub("%s+$", "")
     if rest == "" then
-        return "用法：" .. kind .. " 股票名 价格（数量可省，留空表示全仓）"
+        return "用法：止损 股票名 [多/空] 价格 [数量]\n（例：止损 平安银行 空 19.2 500；不写数量就是全仓）"
     end
     local parts = split_words(rest)
     if kind == "limit" then
@@ -916,12 +942,14 @@ local function place_cond(msg, kind, default_side)
             return "用法：限价 股票名 买/卖 价格 数量\n（例：限价 隔壁老王 买 18.5 1000）"
         end
         local name = table.concat(parts, " ", 1, #parts - 3)
-        local side = parts[#parts - 2]
+        local dw = parts[#parts - 2]
         local price = tonumber(parts[#parts - 1])
         local qty = tonumber(parts[#parts])
         if price == nil or qty == nil then return "价格或数量不是数字" end
-        local dir = "long"
-        if side == "卖" or side == "卖出" or side == "空" or side == "short" then dir = "short" end
+        local dir = dir_word(dw)
+        if not dir then
+            return "方向只能写「买」或「卖」（例：限价 隔壁老王 买 18.5 1000）"
+        end
         local j = api_post("/api/g/order", {
             g = cur_gid(msg), u = qq, nick = nick, name = name,
             kind = "limit", side = dir, trigger = price, qty = qty
@@ -930,23 +958,44 @@ local function place_cond(msg, kind, default_side)
         if j.code ~= 200 then return "挂单失败：" .. (j.message or "") end
         return j.data.msg
     end
-    -- 止损 / 止盈：股票名 + 价格（可选数量）
+    -- 止损 / 止盈：股票名 [方向] 价格 [数量]
+    --   止损 平安银行 18.5      → 多头止损（方向由持仓推断）
+    --   止损 平安银行 空 19.2   → 空头止损
+    --   止损 平安银行 空 19.2 500 → 空头止损，只平 500 股
+    local kw = (kind == "stop_loss") and "止损" or "止盈"
     if #parts < 2 then
-        return "用法：" .. kind .. " 股票名 价格（数量可省，留空表示全仓）"
+        return "用法：" .. kw .. " 股票名 [多/空] 价格 [数量]\n（例：" .. kw .. " 平安银行 空 19.2 500；不写数量就是全仓）"
     end
-    local price = tonumber(parts[#parts])
-    local qty = 0
-    local name = table.concat(parts, " ", 1, #parts - 1)
-    if price == nil then
-        -- 最后一个词是数量
-        qty = tonumber(parts[#parts]) or 0
-        price = tonumber(parts[#parts - 1])
-        name = table.concat(parts, " ", 1, #parts - 2)
-        if price == nil then return "价格不是数字" end
+    -- 尾部「全仓」= 不写数量
+    if #parts > 0 and all_word(parts[#parts]) then table.remove(parts) end
+    -- 尾部数字：1 个是价格，2 个是「价格 数量」（跟同花顺一个顺序）
+    local nums = {}
+    while #parts > 0 do
+        local v = tonumber(parts[#parts])
+        if v == nil then break end
+        table.insert(nums, 1, v)
+        table.remove(parts)
+    end
+    if #nums == 0 then
+        return "价格不是数字（例：" .. kw .. " 平安银行 空 19.2）"
+    end
+    if #nums > 2 then
+        return "参数太多：" .. kw .. " 股票名 [方向] 价格 [数量]"
+    end
+    local price = nums[1]
+    local qty = (#nums >= 2) and nums[2] or 0
+    -- 方向词：紧挨着价格前面那个（多 / 空）
+    local dir = nil
+    if #parts > 0 then dir = dir_word(parts[#parts]) end
+    if dir and #parts > 0 then table.remove(parts) end
+    local name = table.concat(parts, " ")
+    if name == "" then
+        return "要写股票名（例：" .. kw .. " 平安银行 空 19.2）"
     end
     local j = api_post("/api/g/order", {
         g = cur_gid(msg), u = qq, nick = nick, name = name,
-        kind = kind, side = default_side, trigger = price, qty = qty
+        -- 不写方向就传空串，服务端按当前持仓自动推断（只有多头 / 只有空头都行）
+        kind = kind, side = dir or "", trigger = price, qty = qty
     })
     if not j then return "炒股服务没响应" end
     if j.code ~= 200 then return "挂单失败：" .. (j.message or "") end
@@ -954,15 +1003,15 @@ local function place_cond(msg, kind, default_side)
 end
 
 function stock_stop_loss(msg)
-    return place_cond(msg, "stop_loss", "long")
+    return place_cond(msg, "stop_loss")
 end
 
 function stock_take_profit(msg)
-    return place_cond(msg, "take_profit", "long")
+    return place_cond(msg, "take_profit")
 end
 
 function stock_limit(msg)
-    return place_cond(msg, "limit", "long")
+    return place_cond(msg, "limit")
 end
 
 -- 撤条件单
