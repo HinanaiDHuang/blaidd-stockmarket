@@ -10,9 +10,9 @@ WORK = os.path.join(HERE, "_tdata")
 if os.path.isdir(WORK):
     shutil.rmtree(WORK)
 os.makedirs(WORK)
-shutil.copy(os.path.join(SRC_DIR, "sample.db"), os.path.join(WORK, "g_866686067.db"))
+shutil.copy(os.path.join(SRC_DIR, "sample.db"), os.path.join(WORK, "g_10001.db"))
 
-db = dbmod.get_db(WORK, "866686067")
+db = dbmod.get_db(WORK, "10001")
 cfg = dict(__import__("json").load(io.open(os.path.join(SRC_DIR, "config.json"), encoding="utf-8")))
 cfg.setdefault("rename_cost", 3000.0)
 cfg.setdefault("sabotage_daily_limit", 2)
