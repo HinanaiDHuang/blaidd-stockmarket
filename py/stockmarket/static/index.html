@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#0d1117">
 <title>布莱泽模拟炒股</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ctext y='26' font-size='26'%3E%F0%9F%93%88%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="/static/style.css?v=20261118l">
+<link rel="stylesheet" href="/static/style.css?v=20261119a">
 </head>
 <body>
 <div id="app">
@@ -154,16 +154,17 @@
             <option value="limit">限价 · 到价自动开仓</option>
           </select>
           <select id="condSide">
+            <option value="">自动</option>
             <option value="long">多</option>
             <option value="short">空</option>
           </select>
         </div>
         <div class="cond-row">
           <input type="number" id="condTrigger" inputmode="decimal" placeholder="触发价" step="0.001">
-          <input type="number" id="condQty" inputmode="numeric" placeholder="数量（限价必填）" min="1" step="100">
+          <input type="number" id="condQty" inputmode="numeric" placeholder="数量（可留空）" min="1" step="100">
           <button class="mini-btn primary" id="btnCondAdd">挂单</button>
         </div>
-        <div class="hint" id="condHint">止损/止盈针对当前选中的股票，数量留空表示全仓平掉。</div>
+        <div class="hint" id="condHint">方向选「自动」时按你的持仓判断；止损/止盈数量留空 = 全仓平掉，限价单要填数量。</div>
       </div>
       <div class="cond-list" id="condList"></div>
     </div>
@@ -222,7 +223,7 @@
     <div id="toolHost"></div>
 
     <div class="list-card" id="recoveryCard" hidden>
-      <div class="list-title">破产纥困<span class="list-sub">翻身计划</span></div>
+      <div class="list-title">破产纾困<span class="list-sub">翻身计划</span></div>
       <div class="rec-top">
         <div><span class="rec-k">累计收入</span><span class="rec-v" id="recEarn">0</span></div>
         <div><span class="rec-k">剩余欠款</span><span class="rec-v down" id="recLoan">0</span></div>
@@ -438,6 +439,6 @@
 
   <div class="toast" id="toast" hidden></div>
 </div>
-<script src="/static/app.js?v=20261118l"></script>
+<script src="/static/app.js?v=20261119a"></script>
 </body>
 </html>

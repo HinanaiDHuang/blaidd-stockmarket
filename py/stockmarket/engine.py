@@ -1129,7 +1129,10 @@ class Engine:
         peer = random.choice(peers) if peers else "隔壁公司"
         raw = tpl.format(name=info["name"], ind=info["industry"], peer=peer,
                        num=random.randint(3, 99), pct=round(abs(impact) * 100, 1))
-        body = (BOMB_TAG + " " + raw) if bomb else raw
+        # 个股快讯的正文不再抄一遍标题。标题里已经有【题材】+原文，
+        # 正文再抄一次就是同一句话在列表里显示两遍（网页快讯尤其明显）。
+        # 行业/大盘快讯的正文是「影响了哪几家公司」，那才是有用的信息。
+        body = ""
         title = fmt_title(scope, cat, raw, bomb=bomb)
         self.db.ex("INSERT INTO news(ts,cid,ticker,scope,title,body,impact,cat) VALUES(?,?,?,?,?,?,?,?)",
                    (now(), cid, info["ticker"], scope, title, body, impact, cat or ""))

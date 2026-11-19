@@ -157,6 +157,9 @@
     var a = Math.abs(n);
     if (a >= 1e8) return (n / 1e8).toFixed(2) + "\u4ebf";
     if (a >= 1e6) return (n / 1e4).toFixed(1) + "\u4e07";
+    /* 一万以上不再带小数：顶栏格子本来就窄，320px 小屏上
+       「106,681.24」会被 CSS 截成「106,68...」，玩家连自己有多少钱都看不见。 */
+    if (a >= 1e4) return Math.round(n).toLocaleString("zh-CN");
     return fmt(n);
   }
   function cls(n) { return n > 0 ? "up" : n < 0 ? "down" : "flat"; }
@@ -329,6 +332,13 @@
       ctx.fillText("暂无行情数据", 14, H / 2);
       return;
     }
+    /* MT4/MT5 的老样子：光标没落在某根 K 线上时，OHLC 栏显示最后一根；
+       落在哪根就跟哪根。以前这里永远是「开 -- 高 -- 低 -- 收 --」。 */
+    var ohlcBar = (S.cross !== null && S.cross >= 0 && S.cross < bars.length)
+      ? bars[S.cross] : bars[bars.length - 1];
+    $("ohlc").textContent =
+      "开 " + px(ohlcBar.o) + "　高 " + px(ohlcBar.h) + "　" +
+      "低 " + px(ohlcBar.l) + "　收 " + px(ohlcBar.c);
     var plotW = W - PAD_L - PAD_R;
     var plotH = H - PAD_T - PAD_B;
     var volH = Math.max(24, plotH * 0.22);
@@ -483,8 +493,6 @@
       "<div>MA5 " + (m5 === null ? "--" : px(m5)) +
       "　MA10 " + (m10 === null ? "--" : px(m10)) + "</div>" +
       "<div>量 " + fmtInt(d.v) + "</div>";
-    $("ohlc").textContent =
-      "开 " + px(d.o) + "　高 " + px(d.h) + "　低 " + px(d.l) + "　收 " + px(d.c);
   }
 
   /* 触摸：拖动平移，轻点看十字 */
@@ -495,7 +503,7 @@
   });
   cv.addEventListener("pointermove", function (e) {
     var rect = cv.getBoundingClientRect();
-    if (dragging) {
+    if (dragging && e.buttons) {
       var dx = e.clientX - dragX;
       if (Math.abs(dx) > 4) moved = true;
       var v = window_();
@@ -506,7 +514,8 @@
       if (no > maxOff) no = maxOff;
       S.offset = no;
       draw();
-    } else {
+    } else if (e.pointerType === "mouse") {
+      /* 桌面端悬停就能看开盘（手机上手指带一定是平移） */
       updateCross(e.clientX - rect.left);
     }
   });
@@ -1347,6 +1356,10 @@
     var qty = Number($("condQty").value) || 0;
     if (!trigger || trigger <= 0) { toast("先填触发价"); return; }
     if (kind === "limit" && qty <= 0) { toast("限价单要填数量"); return; }
+    /* 限价单是开仓单，必须说清楚买还是卖；
+       止损止盈留「自动」，后端会按你在这只票上的
+       持仓方向自己判断（MT4 就是把 SL/TP 挂在持仓上的）。 */
+    if (kind === "limit" && !side) { toast("限价单要选买还是卖"); return; }
     var body = { cid: S.cid, kind: kind, side: side, trigger: trigger, qty: qty };
     post("/api/order_cond", body).then(function (d) {
       toast(d.msg);
@@ -1448,24 +1461,28 @@
     "<b>\u4f1a\u5458\u8d39</b>\u662f\u51c0\u503c\u8d8a\u9ad8\u6bcf\u5929\u4ea4\u8d8a\u591a\uff08\u4f46\u4f60\u4e5f\u62ff\u5230\u66f4\u591a\u7279\u6743\uff09\uff1b",
     "<b>\u5168\u6c11\u5206\u7ea2</b>\u628a\u5bcc\u8c6a\u4ea4\u7684\u4f1a\u5458\u8d39\u6309\u6d3b\u8dc3\u5ea6 + \u8d2b\u56f0\u5ea6\u53d1\u56de\u7fa4\u91cc\uff0c\u8d2b\u5b97\u62ff\u5f97\u591a\uff1b",
     "<b>\u6253\u571f\u8c6a</b>\u82b1\u5c0f\u94b1\u62a2\u5bcc\u8c6a\u7684\u73b0\u91d1\uff0c\u8d8a\u5bcc\u8d8a\u597d\u62a2\uff0c\u7ffb\u8f66\u5bf9\u65b9\u53cd\u62ff 20%\uff1b",
-    "<b>\u6325\u970d</b>\u82b1\u51c0\u503c\u7684 5% \u6362\u58f0\u671b\uff0c\u58f0\u671b\u8ba9\u4f60\u66f4\u6297\u62a2\u3002</p>",
+    "<b>\u6325\u970d</b>\u82b1\u51c0\u503c\u7684 5% \u6362\u58f0\u671b\uff0c\u58f0\u671b\u8ba9\u4f60\u66f4\u6297\u62a2\uff1b",
+    "<b>\u77ed\u7ebf\u4ea4\u6613\u8d39</b>\uff1a\u6301\u4ed3\u8d8a\u77ed\u624b\u7eed\u8d39\u8d8a\u9ad8\uff082 \u5206\u949f\u5185 5 \u500d\u300110 \u5206\u949f\u5185 2.5 \u500d\u300130 \u5206\u949f\u5185 1.5 \u500d\uff09\uff0c\u60f3\u7701\u624b\u7eed\u8d39\u5c31\u522b\u6765\u56de\u5012\u817e\u3002</p>",
 
     "<h4>\u2465 \u6761\u4ef6\u5355\uff08\u540c\u82b1\u987a\u90a3\u5957\uff09</h4>",
     "<p><b>\u6b62\u635f</b>\uff1a\u4ef7\u8dcc\u5230\u4f60\u7684\u7ebf\u5c31\u81ea\u52a8\u5e73\u4ed3\uff1b<b>\u6b62\u76c8</b>\uff1a\u4ef7\u6da8\u5230\u7ebf\u5c31\u81ea\u52a8\u843d\u888b\uff1b",
-    "<b>\u9650\u4ef7</b>\uff1a\u6302\u4e00\u4e2a\u4e70/\u5356\u7684\u5355\u5b50\uff0c\u5230\u4ef7\u81ea\u52a8\u6210\u4ea4\u3002\u6570\u91cf\u7559\u7a7a = \u5168\u4ed3\u5e73\u6389\u3002\u89e6\u53d1\u540e\u4f1a\u5728\u7fa4\u91cc @ \u4f60\u3002</p>",
+    "<b>\u65b9\u5411</b>\u9009\u300c\u81ea\u52a8\u300d\u65f6\u6309\u4f60\u7684\u6301\u4ed3\u5224\u65ad\uff08\u591a\u7a7a\u4e24\u5934\u90fd\u6301\u7740\u624d\u9700\u8981\u624b\u52a8\u9009\uff09\uff1b",
+    "<b>\u9650\u4ef7</b>\uff1a\u6302\u4e00\u4e2a\u4e70/\u5356\u7684\u5355\u5b50\uff0c\u5230\u4ef7\u81ea\u52a8\u6210\u4ea4\u3002\u6570\u91cf\u7559\u7a7a = \u5168\u4ed3\u5e73\u6389\uff0c\u9650\u4ef7\u5355\u5fc5\u987b\u586b\u6570\u91cf\u3002\u89e6\u53d1\u540e\u4f1a\u5728\u7fa4\u91cc @ \u4f60\u3002</p>",
 
     "<h4>\u2466 \u4ef7\u683c\u63d0\u9192 \u2260 \u6761\u4ef6\u5355</h4>",
     "<p>\u63d0\u9192\u53ea\u662f\u300c\u5230\u4ef7\u558a\u4f60\u4e00\u58f0\u300d\uff0c\u4e0d\u4f1a\u81ea\u52a8\u4ea4\u6613\uff1b\u60f3\u81ea\u52a8\u4ea4\u6613\u7528\u6761\u4ef6\u5355\u3002</p>",
 
     "<h4>\u2467 \u4e8f\u5149\u4e86\u600e\u4e48\u529e</h4>",
-    "<p>\u53ef\u4ee5\u8d37\u6b3e\u63a5\u7740\u73a9\uff0c\u4e5f\u53ef\u4ee5\u53bb\u7fa4\u53cb\u516c\u53f8<b>\u6253\u5de5</b>\u3002\u51c0\u503c\u8dcc\u7834\u7ef4\u6301\u7ebf\u4f1a\u88ab\u5f3a\u5e73\uff0c\u51c0\u503c\u53d8\u8d1f\u5c31\u7834\u4ea7\u3002</p>",
+    "<p>\u53ef\u4ee5\u8d37\u6b3e\u63a5\u7740\u73a9\uff0c\u4e5f\u53ef\u4ee5\u53bb\u7fa4\u53cb\u516c\u53f8<b>\u6253\u5de5</b>\u3002\u51c0\u503c\u8dcc\u7834\u7ef4\u6301\u7ebf\u4f1a\u88ab\u5f3a\u5e73\uff0c\u51c0\u503c\u53d8\u8d1f\u5c31\u7834\u4ea7\u3002",
+    "<b>\u8d37\u6b3e\u770b\u7684\u662f\u300c\u51c0\u503c\u300d\u4e0d\u662f\u300c\u73b0\u91d1\u300d</b>\uff1a\u624b\u4e0a\u8fd8\u6709\u6d6e\u76c8\u5c31\u80fd\u8d37\uff0c\u8d44\u4e0d\u62b5\u503a\uff08\u51c0\u503c\u22640\uff09\u624d\u7b97\u771f\u7834\u4ea7\uff1b",
+    "<b>\u7834\u4ea7\u6e05\u76d8\u540e\u6709 10 \u5929\u51b7\u9759\u671f</b>\uff1a\u4e0d\u80fd\u8d37\u6b3e\u3001\u6760\u6746\u6700\u591a 1 \u500d\uff0c\u6512\u591f\u6536\u5165\u8fd8\u80fd\u7533\u8bf7\u503a\u52a1\u91cd\u6574\u3002</p>",
 
     "<h4>\u2468 \u7834\u4ea7\u4e86\u4e5f\u6709\u7ffb\u8eab\u8def</h4>",
     "<p>\u53ea\u6709<b>\u8d44\u4e0d\u62b5\u503a\uff08\u51c0\u503c\u53d8\u8d1f\uff09</b>\u624d\u7b97\u7834\u4ea7\uff0c\u51c0\u503c\u4e00\u56de\u6b63\u5c31\u81ea\u52a8\u6062\u590d\u4ea4\u6613\u3002",
     "\u7834\u4ea7\u671f\u95f4<b>\u6253\u5de5\u4e0a\u9650\u7ffb\u500d\u3001\u7b7e\u5230\u5956\u52b1\u7ffb\u500d\u3001\u8d37\u6b3e\u514d\u606f</b>\u3002",
     "\u7d2f\u8ba1\u6253\u5de5\u7b49\u6536\u5165 <b>3 \u4e07</b> \u2192 \u3010\u4e34\u65f6\u6551\u52a9\u91d1\u30111 \u4e07\uff1b",
     "\u7d2f\u8ba1 <b>8 \u4e07</b> \u2192 \u3010\u53f8\u6cd5\u91cd\u6574\u3011\uff0c\u5269\u4f59\u6b20\u6b3e\u4e00\u7b14\u52fe\u9500 + 3 \u4e07\u91cd\u542f\u8d44\u91d1\u3002",
-    "\u6211\u7684\u9875\u5e95\u90e8\u300c\u7834\u4ea7\u7ea5\u56f0\u300d\u80fd\u770b\u5230\u8fdb\u5ea6\u6761\u3002</p>",
+    "\u6211\u7684\u9875\u5e95\u90e8\u300c\u7834\u4ea7\u7ebe\u56f0\u300d\u80fd\u770b\u5230\u8fdb\u5ea6\u6761\u3002</p>",
 
     "<h4>\u2469 \u5bcc\u8c6a\u4ff1\u4e50\u90e8\uff08\u51c0\u503c\u5206\u6863\uff09</h4>",
     "<p>\u666e\u901a\u80a1\u6c11 0 \u00b7 \u5c0f\u5bcc\u4e4b\u5bb6 20 \u4e07 \u00b7 \u5927\u5bcc\u4e4b\u5bb6 50 \u4e07 \u00b7 \u8c6a\u95e8 150 \u4e07 \u00b7 \u5de8\u5bcc 500 \u4e07 \u00b7 \u8d22\u9600 1500 \u4e07\u3002",
@@ -1863,7 +1880,7 @@
     for (var i = 0; i < ob.steps.length; i++) {
       var s = ob.steps[i];
       if (s.done) doneNames.push(s.title);
-      else undone.push({ s: s, n: i + 1 });
+      else undone.push({ s: s });
     }
     var pv = ob.total ? Math.round(ob.done / ob.total * 100) : 0;
     var h = `<div class="ob-bar"><div class="ob-bar-in" style="width:${pv}%"></div></div>`;
@@ -1873,7 +1890,7 @@
     for (var k = 0; k < undone.length; k++) {
       var u = undone[k].s;
       h += `<button class="ob-step${k === 0 ? " next" : ""}" type="button" data-otab="${esc(u.tab)}" data-opanel="${esc(u.panel || "")}">
-              <span class="ob-dot">${undone[k].n}</span>
+              <span class="ob-dot">${k + 1}</span>
               <span class="ob-main"><span class="ob-title">${esc(u.title)}</span>
               <span class="ob-desc">${esc(u.desc)}</span></span>
               <span class="ob-go">\u53bb</span></button>`;
