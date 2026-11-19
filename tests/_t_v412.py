@@ -36,9 +36,13 @@ import market
 import recovery
 from engine import Engine
 
-WORK = os.path.join(HERE, "_t_v412")
+# 【并发友好】每个进程用自己的工作目录。
+# 原来固定用 "_t_v412"：两个进程同时跑时，第二个删不掉被第一个占着的 sqlite，
+# 目录还在 -> os.makedirs 报 FileExistsError -> 整条测试直接挂掉。
+# 加上 pid 之后互不干扰，跑完还会自己清掉。
+WORK = os.path.join(HERE, "_t_v412_%d" % os.getpid())
 shutil.rmtree(WORK, ignore_errors=True)
-os.makedirs(WORK)
+os.makedirs(WORK, exist_ok=True)
 cfg = json.load(open(os.path.join(SRC_DIR, "config.json"), encoding="utf-8"))
 db = dbmod.get_db(WORK, "c")
 NOW = int(time.time())
@@ -280,6 +284,9 @@ print("    日收益中位 %+.3f%%（样本 %d，最小 %+.2f%% / 最大 %+.2f%%
     med, len(rets), rets[0] if rets else 0, rets[-1] if rets else 0))
 check("T6.1 日收益中位为正（没有系统性失血）", med > 0.3, "%.3f%%" % med)
 check("T6.2 样本量够（多日多票）", len(rets) >= 40, len(rets))
+
+# 测完把工作目录清掉（不留從机器，下次不会被占住）
+shutil.rmtree(WORK, ignore_errors=True)
 
 print("")
 if FAILED:
