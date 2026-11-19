@@ -27,7 +27,7 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--txt);overflow-x:hi
 .topbar{position:relative;z-index:20;background:linear-gradient(180deg,#0d1117 70%,rgba(13,17,23,.92));
   border-bottom:1px solid var(--line);padding:12px 14px 10px}
 .brand{display:flex;align-items:center;gap:8px;font-size:15px;font-weight:600}
-.brand .name{white-space:nowrap}
+.brand .name{white-space:nowrap;min-width:0;overflow:hidden;text-overflow:ellipsis}
 .logo{font-size:18px}
 .brand-btn{margin-left:auto}
 .brand-btn+.brand-btn{margin-left:0}
@@ -316,7 +316,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
   .topbar{padding:10px 12px 9px}
   .wallet{gap:5px}
   .w-item{padding:6px 4px}
-  .w-label{font-size:9.5px}
+  .w-label{font-size:10px}
   .w-val{font-size:12.5px}
   .tabs{padding:10px 12px 6px;top:74px;gap:5px}
   .tab{font-size:13px}
@@ -334,12 +334,12 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
   .brand-btn{padding:6px 8px}
   .wallet{gap:4px}
   .w-item{padding:6px 2px}
-  .w-label{font-size:9px}
+  .w-label{font-size:9.5px}
   .w-val{font-size:12px}
   /* OHLC 一行放不下会折成两行，看着毛糙：收一收字号和按钮 */
   .chart-foot{gap:6px}
   .chart-foot #ohlc{font-size:10.5px;white-space:nowrap}
-  #btnLatest{padding:6px 7px;font-size:11px}
+  #btnLatest{padding:6px 7px;font-size:11px;min-height:30px}
 }
 /* ---------------- 破产纾困 ---------------- */
 .bankrupt{display:flex;align-items:center;gap:12px;margin:0 14px 12px;padding:11px 13px;

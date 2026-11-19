@@ -249,15 +249,37 @@
     }
     return step();
   }
+  /* 【v4.12.3】连续失败后给后续请求加冷却，别让轮询越打越劣。
+     【为什么】get() 自带 2 次重试，一次失败实际会打 3 次；碰上服务端的
+     读限流（240 次/分，按 QQ 号分桶）就成了「越打越慢、越慢越打」的雪崩。
+     这里连续失败后按 2s/4s/6s… 拉长冷却（最多 30s），成功一次就清零。
+     403（令牌过期）不算失败 —— 那是 authExpired() 的活，不应拖慢别的请求。 */
+  var _netFail = 0;
+  var _netCoolUntil = 0;
   function get(path, extra) {
-    return withRetry(function () {
-      return fetch(path + "?" + qs(extra), {
-        cache: "no-store",
-        headers: { "X-Token": T }
-      }).then(parse);
-    }, 2, 1200).catch(function (e) {
+    var cool = _netCoolUntil - Date.now();
+    var ready = cool > 0
+      ? new Promise(function (r) { setTimeout(r, cool); })
+      : Promise.resolve();
+    return ready.then(function () {
+      return withRetry(function () {
+        return fetch(path + "?" + qs(extra), {
+          cache: "no-store",
+          headers: { "X-Token": T }
+        }).then(parse);
+      }, 2, 1200);
+    }).then(function (r) {
+      _netFail = 0;
+      _netCoolUntil = 0;
+      return r;
+    }).catch(function (e) {
+      var st = e && e.status;
+      if (!st || st === 429 || st >= 500) {
+        _netFail = Math.min(_netFail + 1, 5);
+        _netCoolUntil = Date.now() + Math.min(_netFail * 2000, 30000);
+      }
       var err = new Error(friendlyErr(e));
-      err.status = e && e.status;
+      err.status = st;
       throw err;
     });
   }
@@ -272,10 +294,23 @@
   }
   /* 轮询加一点抖动：整群人同一秒打开页面、同一秒轮询，
      服务端会被瞬间打爆（429 一大半就是这么来的）。 */
+  /* 【v4.12.3】页面切到后台时挂起轮询。
+     【为什么要】四个轮询加起来，一个页面每分钟要打 50+ 次接口；
+     服务端的读限流是 240 次/分**按 QQ 号分桶**，同一个人多开两个群的
+     网页就可能撞上上限弹「刷新太频繁」。而且用户切走的页面
+     本来也看不见，拉了也是白拉（K 线最后一根还在动，切回来
+     补一次就行）。
+     【怎么做】document.hidden 时只挂起定时器、不发请求；
+     visibilitychange 变回可见时立刻全量刷一次。 */
   function pollEvery(ms, fn, jitter) {
-    setTimeout(function tick() {
+    var wait = function () { return ms + Math.floor(Math.random() * (jitter || 0)); };
+    var timer = setTimeout(function tick() {
+      if (document.hidden) {
+        timer = setTimeout(tick, 2000);
+        return;
+      }
       fn();
-      setTimeout(tick, ms + Math.floor(Math.random() * (jitter || 0)));
+      timer = setTimeout(tick, wait());
     }, Math.floor(Math.random() * (jitter || 0)));
   }
   function post(path, body, method) {
@@ -2226,5 +2261,11 @@
     pollEvery(5000, refreshCandles, 2000);
     pollEvery(8000, refreshBoard, 2500);
     pollEvery(10000, refreshFun, 3000);
+    /* 【v4.12.3】从后台切回来立刻补一次全量刷新，
+       别让用户盯着旧数据等下一轮。 */
+    document.addEventListener("visibilitychange", function () {
+      if (document.hidden) return;
+      refreshState().then(refreshCandles).then(refreshBoard).then(refreshFun);
+    });
   });
 })();

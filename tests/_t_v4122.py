@@ -119,8 +119,11 @@ check("T3.1 条件单方向有「自动」选项", '<option value="">自动</opt
 check("T3.2 条件单默认选中自动（第一个 option）",
       re.search(r'<select id="condSide">\s*<option value="">自动</option>', ix) is not None)
 check("T3.3 没有「纥困」错别字", ("纥困" not in ix) and ("纥困" not in js))
+# 版本号会随版本推进，这里只校验「两处一致且不是旧版」，
+# 不硬编码某个具体值（否则下一次改版本号就要改这里）。
+_sv = re.findall(r"\?v=([0-9a-zA-Z]+)", ix)
 check("T3.4 静态资源版本号一致且已更新",
-      ix.count("?v=20261119a") == 2 and "20261118l" not in ix, ix.count("?v=20261119a"))
+      len(_sv) == 2 and _sv[0] == _sv[1] and _sv[0] > "20261119a", repr(_sv))
 check("T3.5 顶栏大额去掉小数（1e4 分支）",
       'if (a >= 1e4) return Math.round(n).toLocaleString("zh-CN");' in js)
 check("T3.6 OHLC 栏默认取最后一根 K 线", "ohlcBar" in js and "bars[bars.length - 1]" in js)
@@ -128,7 +131,10 @@ _cross = js[js.index("function updateCross("): js.index("function updateCross(")
 check("T3.7 updateCross 不再单独写 OHLC", '$("ohlc")' not in _cross)
 check("T3.8 新手引导序号连续", "${k + 1}" in js and "n: i + 1" not in js)
 check("T3.9 限价单 + 自动方向前端拦一道", 'kind === "limit" && !side' in js)
-check("T3.10 品牌名单行不折行", ".brand .name{white-space:nowrap}" in cs)
+_bn = re.search(r"\.brand \.name\{[^}]*\}", cs)
+check("T3.10 品牌名单行不折行",
+      bool(_bn) and "white-space:nowrap" in _bn.group(0),
+      _bn.group(0) if _bn else "(no .brand .name rule)")
 check("T3.11 最近改动按钮热区放大", "min-height:30px" in cs)
 check("T3.12 窄屏断点存在", "@media (max-width:360px)" in cs)
 # HELP_HTML 在 app.js 里是 \\uXXXX 转义，先解码再查

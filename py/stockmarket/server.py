@@ -108,6 +108,19 @@ TOKEN_TTL = 60 * 60 * 24 * int(CFG.get("token_ttl_days", 7))
 # 主人明说不要在群里发公告，那就把变更说清楚放网页上。
 CHANGELOG = [
     {
+        "ver": "v4.12.3",
+        "date": "2026-11-19",
+        "title": "网页少折腾服务端，小屏再抠一点",
+        "items": [
+            "网页切到后台（切别的标签页、锁屏）时自动停掉刷新：回到前台立刻补一次最新的 —— 不用对着旧数据等下一轮",
+            "网络抽风时网页会自己缓一缓再重试，不再越刷越慢、越慢越刷（也不容易撞上「刷新太频繁」）",
+            "新加的群不用再等半小时才显示群名：第一次看到的是一串数字的话，几秒内就换成真群名",
+            "小屏顶栏的「净值 / 可用 / 欠款 / 浮动」标签字号加大一点，320px 下不那么费眼",
+            "320px 下顶栏品牌名太长会挤到按钮，现在改成超长自动省略",
+            "「回到最新」按钮点击区加高到 30px，手机上好按一点",
+        ],
+    },
+    {
         "ver": "v4.12.2",
         "date": "2026-11-19",
         "title": "网页小毛病一批：条件单方向、K 线 OHLC、新手引导",
@@ -489,42 +502,32 @@ def _remember_members(gid, members):
 # 就能自己拿到该群的链接和令牌 —— 按账户授权不构成提权；
 # 反过来，没有账户的群一律不给换。
 
-def _group_name(gid):
-    """群名（只读缓存）。拿不到就返回空串，前端退回显示群号。
+# 【v4.12.3】群名「取不到就排队即时补拉」的队列。
+# 【为什么要】以前新群只能等下一次半小时的全量刷新才显示名字 —— 用户新加的群
+# 在网页「换群」下拉里就是一串数字，看着像坏了。半小时那次是给「群改名」用的，
+# 不该让「新群第一次显示名字」也等这么久。
+# 【怎么做】请求里发现没名字就把 gid 丢进队列，后台 2 秒一轮单独补拉；
+# 同一个群 5 分钟内不重复排队，防止某个群一直拉不到时把 OneBot 打爆。
+_gname_pending = set()
+_gname_try_at = {}
+_gname_lock = threading.Lock()
 
-    【为什么不现取】群名要走一次 OneBot 往返，网络慢的时候能把网页请求
-    拖住好几秒，而且第一个点开下拉的人要替所有人挨这一下。
-    改成后台慢慢拉（见 _refresh_group_names），请求里只读缓存。
-    """
+
+def _queue_group_name(gid):
+    """没缓存到群名时排队，等后台即时补拉一次。"""
     gid = str(gid).strip()
-    if not gid:
-        return ""
-    try:
-        row = dbmod.get_registry(DATA_DIR).q1(
-            "SELECT value FROM meta WHERE key=?", ("gname_%s" % gid,))
-        if row and row["value"]:
-            parts = row["value"].split("|", 1)
-            if len(parts) == 2:
-                return parts[1]
-    except Exception:
-        pass
-    return ""
-
-
-def _refresh_group_names():
-    """后台把群名拉一遍（OneBot 的 get_group_info），写进登记表缓存。
-
-    群名会变（改名、退群），所以每半小时刷一次；拉失败就保留旧名，
-    实在没有就显示群号 —— 群名只是好看，功能不靠它。
-    """
-    gids = dbmod.known_groups(DATA_DIR)
-    if not gids:
+    if not gid or not gid.isdigit():
         return
-    # 服务刚起来时推送通道还在握手，等它连上再问
-    for _ in range(20):
-        if PUSHER.connected:
-            break
-        time.sleep(1)
+    now = time.time()
+    with _gname_lock:
+        if now - _gname_try_at.get(gid, 0) < 300:
+            return
+        _gname_try_at[gid] = now
+        _gname_pending.add(gid)
+
+
+def _fetch_group_names(gids):
+    """真去 OneBot 拉群名写缓存，返回成功个数。"""
     got = 0
     for gid in gids:
         try:
@@ -540,7 +543,71 @@ def _refresh_group_names():
             got += 1
         except Exception:
             continue
+    return got
+
+
+def _group_name(gid):
+    """群名（只读缓存）。拿不到就返回空串，前端退回显示群号。
+
+    【为什么不现取】群名要走一次 OneBot 往返，网络慢的时候能把网页请求
+    拖住好几秒，而且第一个点开下拉的人要替所有人挨这一下。
+    改成后台慢慢拉（见 _refresh_group_names），请求里只读缓存。
+
+    【v4.12.3】拿不到名字时顺手排个队，后台几秒内补拉一次 —— 新群不用
+    再干等半小时（见 _queue_group_name）。
+    """
+    gid = str(gid).strip()
+    if not gid:
+        return ""
+    try:
+        row = dbmod.get_registry(DATA_DIR).q1(
+            "SELECT value FROM meta WHERE key=?", ("gname_%s" % gid,))
+        if row and row["value"]:
+            parts = row["value"].split("|", 1)
+            if len(parts) == 2:
+                return parts[1]
+    except Exception:
+        pass
+    _queue_group_name(gid)
+    return ""
+
+
+def _refresh_group_names():
+    """后台把群名全量拉一遍（OneBot 的 get_group_info），写进登记表缓存。
+
+    群名会变（改名、退群），所以每半小时刷一次；拉失败就保留旧名，
+    实在没有就显示群号 —— 群名只是好看，功能不靠它。
+    """
+    gids = dbmod.known_groups(DATA_DIR)
+    if not gids:
+        return
+    # 服务刚起来时推送通道还在握手，等它连上再问
+    for _ in range(20):
+        if PUSHER.connected:
+            break
+        time.sleep(1)
+    got = _fetch_group_names(gids)
     print("[stockmarket] group names refreshed: %d/%d" % (got, len(gids)), flush=True)
+
+
+def _group_name_worker():
+    """待办队列：缺名字的群优先补拉一次（不用等半小时的全量刷新）。"""
+    while True:
+        time.sleep(2.0)
+        try:
+            if not PUSHER.connected:
+                continue
+            with _gname_lock:
+                pend = sorted(_gname_pending)
+                _gname_pending.clear()
+            if not pend:
+                continue
+            got = _fetch_group_names(pend)
+            if got:
+                print("[stockmarket] group names on-demand: %d/%d"
+                      % (got, len(pend)), flush=True)
+        except Exception as exc:
+            print("[stockmarket] group name worker error:", exc, flush=True)
 
 
 def _group_name_loop():
@@ -550,7 +617,6 @@ def _group_name_loop():
         except Exception as exc:
             print("[stockmarket] group name refresh error:", exc, flush=True)
         time.sleep(1800)
-
 
 def _user_groups(uid):
     """这个 QQ 在哪些群已经开户（= 在那些群注册过）。"""
@@ -1232,7 +1298,11 @@ def api_candles():
     if not _rate_ok("read", int(CFG.get("read_limit_per_min", 240)), ident=uid):
         return fail("刷新太频繁，稍等一下再试", 429)
     cid = request.args.get("cid", type=int)
-    n = min(max(request.args.get("n", 240, type=int), 30), 1000)
+    # 【v4.12.3】n 和 limit 都认（外部脚本 / 手搓链接两种叫法都遇到过）
+    n = request.args.get("n", None, type=int)
+    if n is None:
+        n = request.args.get("limit", 240, type=int)
+    n = min(max(n, 30), 1000)
     rows = handle.q("SELECT ts,o,h,l,c,v FROM candles WHERE cid=? ORDER BY ts DESC LIMIT ?", (cid, n))
     return ok([{"ts": r["ts"], "o": r["o"], "h": r["h"], "l": r["l"], "c": r["c"], "v": r["v"]}
                for r in reversed(rows)])
@@ -2804,5 +2874,7 @@ if __name__ == "__main__":
     threading.Thread(target=push_loop, daemon=True).start()
     # 群名后台预取（网页端「换群」下拉要用）
     threading.Thread(target=_group_name_loop, daemon=True).start()
+    # 【v4.12.3】缺名字的群即时补拉（新群不用等半小时的全量刷新）
+    threading.Thread(target=_group_name_worker, daemon=True).start()
     print("[stockmarket] listening on :%s  data=%s" % (CFG["port"], DATA_DIR), flush=True)
     app.run(host="0.0.0.0", port=CFG["port"], debug=False, threaded=True)
