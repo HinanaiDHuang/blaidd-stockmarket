@@ -602,6 +602,24 @@ class Engine:
         self.db.ex("DELETE FROM candles WHERE ts < ?", (cutoff,))
 
     def _update_candle(self, cid, price, vol):
+        """把一个 tick 的价格并进 K 线。
+
+        【为什么整段要加群级锁】原来这里是「先查这根 K 线有没有，
+        没有就 INSERT」—— 查和插是两句话，中间有空档。
+        调度线程在跑 tick、新闻线程同时在给同一只票补 K 线时，
+        两个线程会同时查到「没有这根」，然后两个都 INSERT，
+        第二个直接撞 UNIQUE 约束：
+            UNIQUE constraint failed: candles.cid, candles.ts
+        这个异常一路冒到调度器的 except 里，**整个群这一 tick 的后续处理全被中断**
+        （线上 8 个群轮流报这个错，日志里能刷出一大片）。
+
+        现在整段在群级锁（GroupDB.lock）里做，查+插变成原子的，
+        顺带把「跨日滚动昨收」也保护住，不会滚两次。
+        """
+        with self.db.lock:
+            self._update_candle_locked(cid, price, vol)
+
+    def _update_candle_locked(self, cid, price, vol):
         step = self.cfg["candle_seconds"]
         ts = now() - now() % step
         row = self.db.q1("SELECT o,h,l,c,v FROM candles WHERE cid=? AND ts=?", (cid, ts))

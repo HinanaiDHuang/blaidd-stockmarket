@@ -156,5 +156,7 @@
   "dividend_pool_ref": 500000,
   "dividend_pool_boost_max": 6,
   "dividend_pool_cap": 3000000,
-  "band_block_ratio": 0.1
+  "band_block_ratio": 0.1,
+  "serve_threads": 16,
+  "slow_request_ms": 1500
 }

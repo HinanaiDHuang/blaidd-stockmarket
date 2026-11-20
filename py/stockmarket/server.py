@@ -118,6 +118,19 @@ TOKEN_TTL = 60 * 60 * 24 * int(CFG.get("token_ttl_days", 7))
 # 主人明说不要在群里发公告，那就把变更说清楚放网页上。
 CHANGELOG = [
     {
+        "ver": "v4.16",
+        "date": "2026-11-20",
+        "title": "服务换成 waitress + 端口独占：野进程抢不走线上流量了",
+        "items": [
+            "HTTP 服务从 Flask 自带的开发服务器换成 waitress（纯 Python 线程池）：开发服务器每来一个请求就往 stderr 写一行访问日志，18 天把 DicePyStock.err 撑到 41 MB，真正的报错埋在里面根本看不见；换掉之后全量访问日志直接消失，err 里只剩 waitress 自己的告警和异常",
+            "并发改成固定 16 个工作线程（上限 1000 连接、单通道 120 秒超时），比开发服务器「一个连接一个线程」稳得多；SQLite 那边语义没变（群级 RLock + check_same_thread=False）",
+            "慢请求（超过 1.5 秒）和 4xx/5xx 仍然会记进日志，但只打路径不打令牌，网页「最近改动」和日志里都不会漏密钥",
+            "端口改成独占模式：Windows 上监听套接字默认允许别人抢同一个端口，之前就有人用 `cmd /c server.py` 手拉了一份野进程（跑的是旧代码），线上流量全被它接走，我们发了新版本却没生效；现在这种情况会直接起不来并报错，不会再「悄无声息地跑旧代码」",
+            "服务器侧加了守护巡检：野生的 server.py 进程会被自动清掉，端口没人听时自动把服务重新拉起来",
+            "顺手修了一个真 bug：K 线写入是「先查有没有、没有就插」两步，调度线程和新闻线程同时处理同一根 K 线时，第二个线程撞 UNIQUE 约束，这个异常一路冒到调度器，**整个群这一 tick 的后续处理全被中断**（线上 8 个群轮流报这个错）；现在整段在群级锁里做，不会再互相踩",
+        ],
+    },
+    {
         "ver": "v4.14",
         "date": "2026-11-20",
         "title": "涨跌停不再是一台印钞机（Kaito 两天 1300 万 → 534 亿的根因）",
@@ -390,6 +403,38 @@ def _api_no_store(resp):
         resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         resp.headers["Pragma"] = "no-cache"
         resp.headers["Expires"] = "0"
+    return resp
+
+
+@app.before_request
+def _mark_t0():
+    """给每个请求打一个起始时间戳（after_request 里算耗时用）。"""
+    request.environ["sm_t0"] = time.time()
+
+
+@app.after_request
+def _log_odd_requests(resp):
+    """只记「有问题的请求」：状态码 >= 400，或者慢请求（超过 slow_request_ms）。
+
+    【为什么不全记】
+    Flask 自带的开发服务器会把**每个请求**都往 stderr 写一行访问日志。
+    现网 8 个群几百人、网页每秒轮询 4 个接口，18 天就把 DicePyStock.err
+    撑到 41 MB —— 真正的 Traceback 埋在几十万行访问日志里，磁盘也迟早被吃满。
+    换成 waitress 之后开发服务器不走了，全量访问日志自然消失；
+    这里补一条「只记异常」的，既保住现场又不吵。
+
+    ⚠️ 只打 path，不打 query —— query 里带着 t= 令牌，不能进日志。
+    """
+    t0 = request.environ.get("sm_t0")
+    dt = (time.time() - t0) if t0 else 0.0
+    try:
+        slow_ms = float(CFG.get("slow_request_ms", 1500) or 1500)
+    except (TypeError, ValueError):
+        slow_ms = 1500.0
+    if resp.status_code >= 400 or dt * 1000.0 >= slow_ms:
+        print("[stockmarket] %s %s g=%s %s %.0fms" % (
+            resp.status_code, request.method, request.args.get("g", "-"),
+            request.path, dt * 1000.0), flush=True)
     return resp
 
 
@@ -3005,6 +3050,95 @@ def scheduler():
         _stop.wait(CFG["tick_seconds"])
 
 
+def _patch_exclusive_bind():
+    """Windows 上独占监听端口：别人抢不走 %d 的流量。
+
+    【踩过的坑】现网曾经同时跑着三份 server.py —— nssm 托管的那份，
+    外加两个用 `cmd /c server.py` 手拉起来的野进程。
+    Werkzeug / waitress 默认都会给监听套接字设 SO_REUSEADDR，
+    而在 Windows 上 SO_REUSEADDR 等于「允许别人来抢同一个端口」：
+    野进程跑的是旧代码，却把线上流量全接走了，我们发了新版本却没生效，
+    排查了大半天才发现线上根本不是我们部署的那份进程。
+
+    换成 SO_EXCLUSIVEADDRUSE 之后：端口被我们占住，别人再 bind 会直接报
+    WSAEADDRINUSE 起不来（而不是偷偷接管流量）——
+    「抢端口」这件事从悄无声息变成一眼看见。
+
+    非 Windows 平台保持 waitress 原样，不影响 Linux 部署。
+    """
+    if os.name != "nt":
+        return
+    try:
+        import socket
+        import waitress.wasyncore as _wa
+    except Exception:
+        return
+
+    def _set_exclusive(self):
+        try:
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        except OSError:
+            pass
+
+    try:
+        _wa.dispatcher.set_reuse_addr = _set_exclusive
+    except Exception:
+        pass
+
+
+def _serve():
+    """起 HTTP 服务。
+
+    【为什么不用 Flask 自带的开发服务器】
+    `app.run()` 起的是 Werkzeug 开发服务器 —— 它每次启动都会喊
+    "WARNING: This is a development server. Do not use it in a production deployment."，
+    而且**每个 HTTP 请求都往 stderr 写一行访问日志**。
+    现网 8 个群几百人、网页每秒轮询 4 个接口，18 天就把 DicePyStock.err
+    撑到 41 MB：真正的 Traceback 埋在几十万行访问日志里，磁盘也迟早被吃满。
+
+    换成 waitress（纯 Python 的 WSGI 服务器，Windows 上最省事）：
+      · 并发走固定线程池，比「一个连接一个线程」的开发服务器稳
+      · **不写逐请求访问日志** —— 那 41 MB 噪音直接消失
+      · 没有那句 "development server" 警告
+      · 真正要盯的只剩 waitress 自己打的 WARNING/ERROR（accept 异常、线程超时）
+
+    SQLite 那边不用担心：db.GroupDB 用 `check_same_thread=False` + 群级 RLock，
+    跟开发服务器「threaded=True」时一样是「一把锁一个群」，语义没变。
+
+    waitress 没装 / 主人想回退时，自动退回 app.run —— 行为跟以前一模一样。
+    回退开关：环境变量 `STOCKMARKET_SERVE=flask`（改完重启即可）。
+    """
+    host = "0.0.0.0"
+    port = int(CFG.get("port", 9030) or 9030)
+    mode = (os.environ.get("STOCKMARKET_SERVE") or "auto").strip().lower()
+    if mode not in ("flask", "waitress"):
+        mode = "auto"
+    if mode != "flask":
+        try:
+            from waitress import serve
+        except ImportError:
+            if mode == "waitress":
+                print("[stockmarket] waitress 没装，回退到 flask 开发服务器", flush=True)
+        else:
+            threads = int(CFG.get("serve_threads", 16) or 16)
+            threads = max(2, min(64, threads))
+            _patch_exclusive_bind()
+            print("[stockmarket] serving with waitress on %s:%s (threads=%d)" % (
+                host, port, threads), flush=True)
+            try:
+                serve(app, host=host, port=port, threads=threads,
+                      connection_limit=1000, channel_timeout=120,
+                      cleanup_interval=30, ident="blaidd-stockmarket")
+            except OSError as exc:
+                print("[stockmarket] 端口 %s 起不来：%s" % (port, exc), flush=True)
+                print("[stockmarket] 多半有个野进程占着 %s（之前有人用 `cmd /c server.py` 手拉过一份，"
+                      "跑的是旧代码）。把它杀掉再让 nssm 重启本服务即可。" % port, flush=True)
+                raise
+            return
+    print("[stockmarket] serving with flask dev server on %s:%s" % (host, port), flush=True)
+    app.run(host=host, port=port, debug=False, threaded=True)
+
+
 if __name__ == "__main__":
     PUSHER.start()
     threading.Thread(target=scheduler, daemon=True).start()
@@ -3014,4 +3148,4 @@ if __name__ == "__main__":
     # 【v4.12.3】缺名字的群即时补拉（新群不用等半小时的全量刷新）
     threading.Thread(target=_group_name_worker, daemon=True).start()
     print("[stockmarket] listening on :%s  data=%s" % (CFG["port"], DATA_DIR), flush=True)
-    app.run(host="0.0.0.0", port=CFG["port"], debug=False, threaded=True)
+    _serve()
