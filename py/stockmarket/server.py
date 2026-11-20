@@ -119,6 +119,18 @@ TOKEN_TTL = 60 * 60 * 24 * int(CFG.get("token_ttl_days", 7))
 # 主人明说不要在群里发公告，那就把变更说清楚放网页上。
 CHANGELOG = [
     {
+        "ver": "v4.20",
+        "date": "2026-11-21",
+        "title": "网页上也能打赏群友了：不用再切回群窗口发指令",
+        "items": [
+            "以前「打赏」只能在群里发指令（打赏 小明 100）。手机上看盘看到手痒想给谁塞点钱，得退出去翻聊天记录找到那个人的名字，再切回来 —— 网页上没有这个入口，等于把功能砍了一半",
+            "现在网页「我的」页多了一个「🧧 打赏群友」面板：写上对方的昵称（或者 QQ 号）、填个金额、点一下就转过去了。跟群指令走的是同一套逻辑、同一个额度，不会两套标准",
+            "面板里直接列出群友名单（昵称 + QQ + 净值），点一下就填进输入框 —— 不用自己拼名字，也不用担心「叫得出好几个人同名到底给哪个」",
+            "额度写得很清楚：可用现金、单笔上限（max(5000, 净值×2%)）、今天还能给多少（max(5000, 净值×5%)）。做不到的当场就退，不会出现「转过去了但只到一半」",
+            "打赏完会自动往群里播报一声「💸 XXX 打赏 XXX 100 元，全群见证！」—— 网页上的操作在群里也看得见，跟群里发指令是一个效果",
+            "限制跟群指令完全一致：破产纾困期、重开期不能打赏；不能自己打赏自己；群里同名会明确告诉你有哪几个人、让你直接报 QQ 号",
+        ],
+    },    {
         "ver": "v4.19",
         "date": "2026-11-21",
         "title": "手续费不再按成交额收：20 倍杠杆不会被手续费吃掉本金",
@@ -1671,6 +1683,64 @@ def api_repay():
         return fail(msg)
     return ok({"msg": msg, "info": info, "me": market.account(handle, CFG, uid)}, msg)
 
+
+def _announce_transfer(gid, text):
+    """打赏全群播报。
+
+    【为什么要播报】群指令「打赏」是布莱泽在群里回的话，全群都看得见；
+    网页上打的赏发生在群外，不播一声就变成「只有你自己知道的事」。
+    走推送通道（OneBot WS）发到群里。播报失败就算了 —— 播报失败不能
+    影响转账本身，所以丢后台线程里做，不占请求时间。
+    """
+    gid = str(gid or "").strip()
+    if not gid or not text:
+        return
+    if not PUSHER.connected:
+        return
+
+    def _run():
+        try:
+            PUSHER.send_group(gid, text)
+        except Exception:
+            pass
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+@app.route("/api/transfer", methods=["GET", "POST"])
+def api_transfer():
+    """打赏群友（网页端）。
+
+    GET  打开面板：我的打赏额度 + 群友名单（选人用）。
+    POST 执行打赏：跟群指令 /api/g/transfer 共用 daily.transfer 一套逻辑，
+        所以额度、破产/重开期限制、同名判定全都一致，不会两套标准。
+    """
+    if request.method == "GET":
+        handle, uid, err = get_ctx(request.args.get("g"), request.args.get("u"),
+                                   request.args.get("t"))
+        if err:
+            return err
+        if not _rate_ok("read", int(CFG.get("read_limit_per_min", 240)), ident=uid):
+            return fail("刷新太频繁，稍等一下再试", 429)
+        return ok({"quota": daily.transfer_quota(handle, CFG, uid),
+                   "members": daily.member_list(handle)})
+    j = request.get_json(silent=True) or {}
+    guard = _trade_guard()
+    if guard:
+        return guard
+    handle, uid, err = get_ctx(j.get("g"), j.get("u"), j.get("t"))
+    if err:
+        return err
+    target = str(j.get("target") or "").strip()
+    if not target:
+        return fail("先写上要打赏给谁")
+    okk, msg, info = daily.transfer(handle, CFG, uid, target, j.get("amount"))
+    if not okk:
+        return fail(msg)
+    _announce_transfer(_resolve_gid(j.get("g"), uid), msg)
+    return ok({"msg": msg, "info": info,
+               "me": market.account(handle, CFG, uid),
+               "quota": daily.transfer_quota(handle, CFG, uid)}, msg)
 
 @app.route("/api/job", methods=["POST"])
 def api_job():

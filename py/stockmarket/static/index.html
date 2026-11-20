@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#0d1117">
 <title>布莱泽模拟炒股</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ctext y='26' font-size='26'%3E%F0%9F%93%88%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="/static/style.css?v=20261120f">
+<link rel="stylesheet" href="/static/style.css?v=20261121a">
 </head>
 <body>
 <div id="app">
@@ -368,7 +368,28 @@
     <div class="calc" id="loanInfo">初始资金固定，日息按时间计提。</div>
       </div>
     </div>
-    <div class="acc-body" id="pnl-dividend" hidden>
+    <div class="acc-body" id="pnl-transfer" hidden>
+      <div class="list-card">
+        <div class="list-title">🧧 打赏群友<span class="list-sub">给群里的人塞点钱</span></div>
+
+    <div class="ord-field">
+      <label for="trTarget">给谁</label>
+      <input type="text" id="trTarget" autocomplete="off" placeholder="昵称或 QQ 号">
+    </div>
+    <div class="pills" id="trAmt"></div>
+    <div class="ord-field">
+      <label for="trAmtInput">金额</label>
+      <input type="number" id="trAmtInput" inputmode="numeric" placeholder="100" min="1" step="10">
+    </div>
+    <button class="big-btn transfer-btn" id="btnTransfer">🧧 打赏</button>
+    <div class="calc" id="trInfo">加载中…</div>
+      </div>
+      <div class="list-card">
+        <div class="list-title">群友名单<span class="list-sub">点一下填进上面</span></div>
+
+    <div class="mem-list" id="memList"><div class="empty">加载中…</div></div>
+      </div>
+    </div>    <div class="acc-body" id="pnl-dividend" hidden>
       <div class="list-card">
         <div class="list-title">全民分红</div>
 
@@ -518,6 +539,6 @@
 
   <div class="toast" id="toast" hidden></div>
 </div>
-<script src="/static/app.js?v=20261120f"></script>
+<script src="/static/app.js?v=20261121a"></script>
 </body>
 </html>

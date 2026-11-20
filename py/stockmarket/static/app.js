@@ -134,6 +134,7 @@
     rob: null, luxury: null, dividend: null, wealth: null,
     fund: null, fundBet: null, fundBoard: [], fundBets: [],
     openPanel: null, loaded: {}, msg: {}, changelog: null,
+    trQuota: null, members: [],
     groups: [], switching: false,
     // 【v4.18】快捷模式 + 每日定投
     mode: "manual", picks: [], pickCid: null, pickReason: "", qPlan: null,
@@ -1886,7 +1887,7 @@
     "<p><b>\u80a1\u7968</b>\u3001<b>\u7b7e\u5230</b>\u3001<b>\u62bd\u5956</b>\u3001<b>\u6295\u7968 \u80a1\u7968\u540d</b>\u3001<b>\u6da8\u505c\u7ade\u731c \u80a1\u7968\u540d</b>\u3001<b>\u6211\u7684\u6761\u4ef6\u5355</b>\u3001",
     "<b>\u6b62\u635f \u80a1\u7968\u540d \u4ef7\u683c</b>\u3001<b>\u6b62\u76c8 \u80a1\u7968\u540d \u4ef7\u683c</b>\u3001<b>\u9650\u4ef7 \u80a1\u7968\u540d \u4e70/\u5356 \u4ef7\u683c \u6570\u91cf</b>\u3001",
     "<b>\u5bcc\u8c6a\u699c</b>\u3001<b>\u6da8\u505c\u699c</b>\u3001<b>\u4eca\u65e5\u590d\u76d8</b>\u3001<b>\u5feb\u8baf</b>\u3001",
-    "<b>\u6211\u7684\u6863\u4f4d</b>\u3001<b>\u6253\u571f\u8c6a \u6635\u79f0</b>\u3001<b>\u6325\u970d \u5bcc\u8fdb</b>\u3001<b>\u9886\u5206\u7ea2</b>\u3001<b>\u8d22\u5bcc\u5206\u5e03</b>\u3001<b>\u8d22\u9600\u57fa\u91d1\uff08\u62bc\u6da8\u62bc\u8dcc\uff09</b>\u3002</p>"
+    "<b>\u6211\u7684\u6863\u4f4d</b>\u3001<b>\u6253\u571f\u8c6a \u6635\u79f0</b>\u3001<b>\u6253\u8d4f \u6635\u79f0 \u91d1\u989d</b>\u3001<b>\u6325\u970d \u5bcc\u8fdb</b>\u3001<b>\u9886\u5206\u7ea2</b>\u3001<b>\u8d22\u5bcc\u5206\u5e03</b>\u3001<b>\u8d22\u9600\u57fa\u91d1\uff08\u62bc\u6da8\u62bc\u8dcc\uff09</b>\u3002</p>"
   ].join("");
 
   function showHelp(on) {
@@ -1974,6 +1975,7 @@
       { n: "\u8d22\u5bcc\u5206\u5e03", i: "\u2696", p: "wealth" }
     ]},
     { g: "\u73a9\u6cd5", items: [
+      { n: "\u6253\u8d4f\u7fa4\u53cb", i: "\ud83e\udde7", p: "transfer" },
       { n: "\u4eba\u6c14\u6295\u7968", i: "\ud83d\uddf3", p: "vote" },
       { n: "\u6da8\u505c\u7ade\u731c", i: "\ud83c\udfaf", p: "guess" },
       { n: "\u6253\u571f\u8c6a", i: "\ud83e\uddb9", p: "rob" },
@@ -2044,13 +2046,86 @@
   }
 
   function loadPanel(pid) {
-    if (pid === "rob") loadRob();
+    if (pid === "transfer") loadTransfer();
+    else if (pid === "rob") loadRob();
     else if (pid === "lux") loadLux();
     else if (pid === "dividend") loadDividend();
     else if (pid === "wealth") loadWealth();
     else if (pid === "fund") loadFund();
   }
 
+  /* ---------------------------------------------------------- 【v4.20】打赏群友 */
+  function renderTrAmt() {
+    var box = $("trAmt");
+    if (!box) return;
+    var opts = [100, 500, 1000, 5000];
+    var h = "";
+    for (var i = 0; i < opts.length; i++) {
+      h += '<button class="pill" type="button" data-tramt="' + opts[i] + '">' + opts[i] + " \u5143</button>";
+    }
+    box.innerHTML = h;
+  }
+
+  function renderTransfer() {
+    var q = S.trQuota;
+    var info = $("trInfo");
+    if (info) {
+      if (!q) {
+        info.textContent = "\u52a0\u8f7d\u4e2d\u2026";
+      } else {
+        info.innerHTML = "\u53ef\u7528\u73b0\u91d1 <b>" + fmtInt(q.cash) + "</b> \u5143 \u00b7 \u5355\u7b14\u4e0a\u9650 <b>" +
+          fmtInt(q.cap) + "</b> \u5143 \u00b7 \u4eca\u65e5\u8fd8\u80fd\u7ed9 <b>" + fmtInt(q.day_left) + "</b> \u5143" +
+          '<div class="calc-note">\u5355\u7b14\u4e0a\u9650 = max(5000, \u51c0\u503c\u00d72%)\uff0c\u5f53\u65e5\u4e0a\u9650 = max(5000, \u51c0\u503c\u00d75%)\u3002\u6253\u8d4f\u4e0d\u6536\u624b\u7eed\u8d39\u3002</div>';
+      }
+    }
+    var box = $("memList");
+    if (!box) return;
+    if (!S.members.length) {
+      box.innerHTML = '<div class="empty">\u7fa4\u91cc\u8fd8\u6ca1\u6709\u522b\u4eba\u5f00\u6237</div>';
+      return;
+    }
+    var h = "";
+    for (var i = 0; i < S.members.length; i++) {
+      var m = S.members[i];
+      var mine = (String(m.qq) === String(U));
+      h += '<div class="mem' + (mine ? " me" : "") + '" data-mem="' + esc(m.qq) +
+        '" data-nick="' + esc(m.nick || m.qq) + '">' +
+        '<span class="mem-name">' + esc(m.nick || m.qq) + (mine ? "\uff08\u6211\uff09" : "") + "</span>" +
+        '<span class="mem-sub">' + esc(m.qq) + "</span>" +
+        '<span class="mem-val">' + fmtInt(m.equity) + "</span></div>";
+    }
+    box.innerHTML = h;
+  }
+
+  function loadTransfer() {
+    get("/api/transfer").then(function (d) {
+      S.trQuota = d.quota || null;
+      S.members = d.members || [];
+      renderTransfer();
+    }).catch(function (e) {
+      var box = $("memList");
+      if (box) box.innerHTML = '<div class="empty">' + esc(friendlyErr(e)) + "</div>";
+    });
+  }
+
+  function doTransfer() {
+    var t = ($("trTarget").value || "").trim();
+    if (!t) { toast("\u5148\u5199\u4e0a\u8981\u6253\u8d4f\u7ed9\u8c01"); return; }
+    var v = Number($("trAmtInput").value);
+    if (!v || v <= 0) { toast("\u5148\u586b\u4e2a\u91d1\u989d"); return; }
+    var btn = $("btnTransfer");
+    if (btn) btn.disabled = true;
+    post("/api/transfer", { target: t, amount: v })
+      .then(function (d) {
+        toast(d.msg);
+        if (d.me) S.me = d.me;
+        $("trTarget").value = "";
+        $("trAmtInput").value = "";
+        return Promise.all([refreshState(), loadTransfer()]);
+      })
+      .catch(function (e) { toast(friendlyErr(e)); })
+      .then(function () { if (btn) btn.disabled = false; });
+  }
   /* ---------------------------------------------------------- 富豪经济 */
   function loadRob() {
     get("/api/tycoon/rob").then(function (d) {
@@ -2591,7 +2666,17 @@
   $("btnShort").addEventListener("click", function () { doOrder("short"); });
   $("btnBorrow").addEventListener("click", function () { moneyAction("borrow"); });
   $("btnRepay").addEventListener("click", function () { moneyAction("repay"); });
-  $("btnJob").addEventListener("click", doJob);
+  $("btnTransfer").addEventListener("click", doTransfer);
+  $("trAmt").addEventListener("click", function (e) {
+    var el = e.target.closest ? e.target.closest("[data-tramt]") : null;
+    if (!el) return;
+    $("trAmtInput").value = el.getAttribute("data-tramt");
+  });
+  $("memList").addEventListener("click", function (e) {
+    var el = e.target.closest ? e.target.closest("[data-mem]") : null;
+    if (!el) return;
+    $("trTarget").value = el.getAttribute("data-nick") || el.getAttribute("data-mem");
+  });  $("btnJob").addEventListener("click", doJob);
   $("btnPeek").addEventListener("click", doPeek);
   $("btnCheckin").addEventListener("click", doCheckin);
   $("btnRemAdd").addEventListener("click", addReminder);
@@ -2786,6 +2871,7 @@
   renderQuickLev();
   renderAutoAmt();
   renderAutoLev();
+  renderTrAmt();
   loadAuto();
   refreshState().then(function () {
     return refreshCandles();

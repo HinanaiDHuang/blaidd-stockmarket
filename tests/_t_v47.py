@@ -234,10 +234,13 @@ mk_user("9502", "散户", 50000.0)
 cid = int(db.q1("SELECT id FROM companies WHERE ticker='HL01'")["id"])
 okk, msg, info = market.place_order(db, cfg, "9501", cid, "long", 1000, 30)
 check("T7.1 豪门杠杆上限 20+6=26", "杠杆 26x" in msg, msg[:60])
-check("T7.2 豪门手续费打 85 折", abs(info["fee"] - 85.0) < 0.01, info["fee"])
+# 【v4.19 后口径】手续费基数 = 成交额 × min(1, 5/杠杆)
+#   豪门 26 倍：100000 × 5/26 = 19230.77 × 0.1% = 19.23，再打 85 折 = 16.35
+check("T7.2 豪门手续费打 85 折", abs(info["fee"] - 16.35) < 0.01, info["fee"])
 okk2, msg2, info2 = market.place_order(db, cfg, "9502", cid, "long", 1000, 30)
 check("T7.3 散户杠杆上限还是 20", "杠杆 20x" in msg2, msg2[:60])
-check("T7.4 散户手续费没折扣", abs(info2["fee"] - 100.0) < 0.01, info2["fee"])
+#   散户 20 倍：100000 × 5/20 = 25000 × 0.1% = 25（无折扣）
+check("T7.4 散户手续费没折扣", abs(info2["fee"] - 25.0) < 0.01, info2["fee"])
 
 # ============================================================ T8 体检 / 文本
 print("\n[T8] 体检与文本")

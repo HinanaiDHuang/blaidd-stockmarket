@@ -446,6 +446,59 @@ def _find_users(db, target):
                 ("%" + target + "%",))
 
 
+def transfer_quota(db, cfg, qq):
+    """打赏额度：单笔上限 / 当日剩余 / 可用现金。给网页面板显示用。
+
+    跟 transfer() 里算额度的是同一套公式，只是单独拎出来一份给界面用 ——
+    界面要写「单笔最多多少」「今天还能给多少」，不能让人自己心算。
+    """
+    acct = market.account(db, cfg, qq)
+    equity = max(0.0, acct["equity"]) if acct else 0.0
+    eq_ratio = float(cfg.get("transfer_equity_ratio", 0.02))
+    day_eq_ratio = float(cfg.get("transfer_daily_equity_ratio", 0.05))
+    cap = max(float(cfg.get("transfer_max", 5000.0)), equity * eq_ratio)
+    day_cap = max(float(cfg.get("transfer_daily_cap", 5000.0)), equity * day_eq_ratio)
+    row = db.q1("SELECT COALESCE(SUM(-delta),0) s FROM ledger"
+                " WHERE qq=? AND ts>=? AND reason LIKE '打赏%'",
+                (str(qq), features.day_start()))
+    used = float(row["s"] or 0) if row else 0.0
+    return {
+        "equity": round(equity, 2),
+        "cash": round(float(acct["cash"]) if acct else 0.0, 2),
+        "cap": round(cap, 2),
+        "day_cap": round(day_cap, 2),
+        "day_left": round(max(0.0, day_cap - used), 2),
+        "eq_ratio": eq_ratio,
+    }
+
+
+def member_list(db, limit=60):
+    """群友名单（网页打赏选人用）：昵称 / QQ / 净值，按净值从高到低。
+
+    【为什么要名单】打赏是按昵称找人的，群里同名的话转账会直接报错让你报 QQ 号。
+    网页上直接把名单列出来、点一下就填进输入框，少一事是一事。
+    净值口径跟 market.account 一致：现金 - 欠款 + 保证金 + 浮动盈亏。
+    """
+    try:
+        rows = db.q(
+            "SELECT u.qq AS qq, u.nick AS nick,"
+            " (u.cash - u.loan"
+            "  + COALESCE(SUM(p.margin), 0)"
+            "  + COALESCE(SUM((c.price - p.entry) * p.qty *"
+            "      (CASE WHEN p.side = 'long' THEN 1 ELSE -1 END)), 0)) AS equity"
+            " FROM users u"
+            " LEFT JOIN positions p ON p.qq = u.qq AND p.status = 'open'"
+            " LEFT JOIN companies c ON c.id = p.cid"
+            " GROUP BY u.qq, u.nick, u.cash, u.loan"
+            " ORDER BY equity DESC LIMIT ?", (int(limit),))
+    except Exception:
+        rows = []
+    out = []
+    for r in rows:
+        out.append({"qq": r["qq"], "nick": r["nick"],
+                    "equity": round(float(r["equity"] or 0), 2)})
+    return out
+
 def transfer(db, cfg, qq, target, amount):
     """群友之间打赏：自己掏钱给对方。"""
     qq = str(qq)
