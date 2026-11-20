@@ -163,6 +163,14 @@
     if (a >= 1e4) return Math.round(n).toLocaleString("zh-CN");
     return fmt(n);
   }
+  /* 挥霍价格：顶配一单就能到百万，写成「1000000」太长，改成万 / 亿。 */
+  function fmtYuan(n) {
+    n = Number(n) || 0;
+    var a = Math.abs(n);
+    if (a >= 1e8) return (n / 1e8).toFixed(2) + "\u4ebf";
+    if (a >= 1e4) return (n / 1e4).toFixed(a >= 1e6 ? 0 : 1) + "\u4e07";
+    return Math.round(n).toLocaleString("zh-CN");
+  }
   function cls(n) { return n > 0 ? "up" : n < 0 ? "down" : "flat"; }
   function pct(n) { return (n > 0 ? "+" : "") + (Number(n) || 0).toFixed(2) + "%"; }
   function tm(ts) {
@@ -1883,7 +1891,8 @@
     var h = "";
     if (S.msg.lux) h += `<div class="ty-msg">${esc(S.msg.lux).replace(/\n/g, "<br>")}</div>`;
     h += `<div class="ty-line">\u51c0\u503c <b>${fmtInt(st.equity)}</b> \u5143 \u00b7 \u58f0\u671b <b>${st.rep}</b></div>`;
-    h += `<div class="ty-line">\u4e00\u5355\u5927\u7ea6 <b>${fmtInt(st.price)}</b> \u5143\uff08\u51c0\u503c\u7684 5%\uff09\u3002\u58f0\u671b\u8d8a\u9ad8\u8d8a\u4e0d\u5bb9\u6613\u88ab\u4eba\u62a2\u3002</div>`;
+    h += `<div class="ty-line">\u57fa\u51c6\u4ef7 <b>${fmtInt(st.base != null ? st.base : st.price)}</b> \u5143\uff08\u51c0\u503c\u7684 5%\uff09\uff0c\u5404\u6863 ${fmtYuan(st.min_price)} ~ ${fmtYuan(st.max_price)} \u5143\u3002</div>`;
+    h += `<div class="ty-line">\u58f0\u671b\u8d8a\u9ad8\u8d8a\u4e0d\u5bb9\u6613\u88ab\u4eba\u62a2\uff1b\u6863\u4f4d\u8d8a\u9ad8\u4ef7\u683c\u8d8a\u8d35\uff0c\u6bcf\u70b9\u58f0\u671b\u7684\u6027\u4ef7\u6bd4\u8d8a\u5dee\u3002</div>`;
     if (st.limit != null) {
       if (st.full) {
         h += `<div class="ty-line job-tip">\u4eca\u5929\u7684\u989d\u5ea6\u7528\u5b8c\u4e86\uff08${st.used}/${st.limit}\uff09\uff0c\u660e\u5929\u518d\u6765\u3002</div>`;
@@ -1895,8 +1904,9 @@
     for (var i = 0; i < st.items.length; i++) {
       var it = st.items[i];
       h += `<div class="ty-target">
-              <span class="ty-name">${it.emoji} ${esc(it.name)}<span class="r-sub">\u58f0\u671b +${it.rep} \u00b7 ${esc(it.desc)}</span></span>
-              <button class="mini-btn" type="button" data-lux="${esc(it.name)}"${st.full ? " disabled" : ""}>${st.full ? "\u4eca\u5929\u6ca1\u989d\u5ea6\u4e86" : "\u4e70"}</button>
+              <span class="ty-name">${it.emoji} ${esc(it.name)}<span class="r-sub">${esc(it.tier || "")} \u00b7 \u58f0\u671b +${it.rep} \u00b7 ${esc(it.desc || "")}</span></span>
+              <span class="ty-eq">${fmtYuan(it.price)}</span>
+              <button class="mini-btn" type="button" data-lux="${esc(it.name)}"${(st.full || (st.cash != null && it.price > st.cash)) ? " disabled" : ""}>${st.full ? "\u4eca\u5929\u6ca1\u989d\u5ea6\u4e86" : ((st.cash != null && it.price > st.cash) ? "\u94b1\u4e0d\u591f" : "\u4e70")}</button>
             </div>`;
     }
     box.innerHTML = h;

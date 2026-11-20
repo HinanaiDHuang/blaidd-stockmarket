@@ -41,17 +41,17 @@ DIV_MARK = "全民分红"              # ledger 原因前缀
 
 LUXURY = [
     {"key": "car", "name": "豪华座驾", "emoji": "🏎", "rep": 2, "alias": "豪车",
-     "desc": "开出去全群都认识你"},
-    {"key": "house", "name": "江景大宅", "emoji": "🏰", "rep": 3, "alias": "豪宅",
-     "desc": "群里第一个背房贷的人"},
+     "mult": 0.5, "tier": "入门", "desc": "开出去全群都认识你"},
     {"key": "watch", "name": "收藏腕表", "emoji": "⌚", "rep": 2, "alias": "手表",
-     "desc": "表针指着别人的股价"},
+     "mult": 0.8, "tier": "小资", "desc": "表针指着别人的股价"},
+    {"key": "house", "name": "江景大宅", "emoji": "🏰", "rep": 3, "alias": "豪宅",
+     "mult": 1.0, "tier": "进阶", "desc": "群里第一个背房贷的人"},
     {"key": "yacht", "name": "私人游艇", "emoji": "🛥", "rep": 4, "alias": "游艇",
-     "desc": "把业绩发布开到海上"},
+     "mult": 2.0, "tier": "高端", "desc": "把业绩发布开到海上"},
     {"key": "club", "name": "私人会所", "emoji": "🥂", "rep": 5, "alias": "会所",
-     "desc": "高层俱乐部的入场券"},
+     "mult": 3.0, "tier": "奢华", "desc": "高层俱乐部的入场券"},
     {"key": "jet", "name": "私人飞机", "emoji": "✈", "rep": 7, "alias": "飞机",
-     "desc": "涨停了立刻飞出去庆祝"},
+     "mult": 5.0, "tier": "顶配", "desc": "涨停了立刻飞出去庆祝"},
 ]
 
 # ---------------------------------------------------------------- 小工具
@@ -88,6 +88,20 @@ def _rep(db, qq):
 
 def _add_rep(db, qq, delta):
     db.ex("UPDATE users SET reputation=MAX(0, reputation+?) WHERE qq=?", (delta, str(qq)))
+
+
+def _yuan(v):
+    """群消息里的金额：大数别写成一长串数字（顶配一单就上百万）。"""
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return str(v)
+    a = abs(v)
+    if a >= 1e8:
+        return "%.2f亿" % (v / 1e8)
+    if a >= 1e4:
+        return "%.1f万" % (v / 1e4)
+    return "%.0f" % v
 
 
 def pool_get(db):
@@ -484,8 +498,8 @@ def rob(db, cfg, qq, target_key):
     return True, msg, info
 
 # ================================================================ 挥霍消费
-def luxury_price(cfg, equity):
-    """挥霍价格：净值的 5%（有上下限）。"""
+def luxury_base_price(cfg, equity):
+    """挥霍基准价：净值的 5%（有上下限），所有档次都用它当锚。"""
     ratio = float(cfg.get("luxury_ratio", 0.05))
     lo = float(cfg.get("luxury_min", 5000))
     hi = float(cfg.get("luxury_max", 200000))
@@ -493,12 +507,52 @@ def luxury_price(cfg, equity):
     return round(min(hi, max(lo, price)), 2)
 
 
-def luxury_list(cfg=None):
+def luxury_price(cfg, equity, item=None):
+    """挥霍价格 = 基准价 × 档次系数。
+
+    【v4.13.2 为什么不再是一个价】
+    原来 6 件排面品（座驾 / 腕表 / 大宅 / 游艇 / 会所 / 飞机）共用一个价格，
+    声望却差 3.5 倍 —— 群友一看「怎么价格都一样」，排面根本没有梯度。
+    现在每件东西有自己的档次系数 mult：入门 0.5 倍 → 顶配 5 倍，
+    同一份身家，清单从「一顿饭」一路排到「一套房」。
+    基准价先 clamp 再乘系数：净值撞了上限的巨富买飞机还是 5 倍，
+    不会被上限抹平成跟座驾一个价。
+    """
+    base = luxury_base_price(cfg, equity)
+    mult = 1.0
+    if item:
+        try:
+            mult = float(item.get("mult") or 1.0)
+        except (TypeError, ValueError):
+            mult = 1.0
+    mult = max(0.1, min(10.0, mult))
+    return round(base * mult, 2)
+
+
+def luxury_items(cfg, equity):
+    """带价格的挥霍清单（网页面板和群指令都用它）。"""
+    out = []
+    for i in LUXURY:
+        d = dict(i)
+        d["price"] = luxury_price(cfg, equity, i)
+        out.append(d)
+    return out
+
+
+def luxury_list(cfg=None, equity=None):
     cfg = cfg or {}
     ratio = float(cfg.get("luxury_ratio", 0.05))
-    return ["🛍 挥霍清单（花掉净值的 %.0f%%，换声望）：" % (ratio * 100)] + \
-           ["%s %s：声望 +%d —— %s" % (i["emoji"], i["name"], i["rep"], i["desc"])
-            for i in LUXURY]
+    head = "🛍 挥霍清单（基准价 = 净值的 %.0f%%，档次越贵越有排面）：" % (ratio * 100)
+    lines = [head]
+    for i in LUXURY:
+        if equity is None:
+            lines.append("%s %s【%s】：声望 +%d —— %s"
+                         % (i["emoji"], i["name"], i.get("tier") or "", i["rep"], i["desc"]))
+        else:
+            lines.append("%s %s【%s】：%s 元 · 声望 +%d —— %s"
+                         % (i["emoji"], i["name"], i.get("tier") or "",
+                            _yuan(luxury_price(cfg, equity, i)), i["rep"], i["desc"]))
+    return lines
 
 
 def luxury_count_today(db, qq):
@@ -527,14 +581,17 @@ def luxury_status(db, cfg, qq):
     if me is None:
         return None
     eq = _equity(db, cfg, qq)
-    price = luxury_price(cfg, eq)
+    base = luxury_base_price(cfg, eq)
+    items = luxury_items(cfg, eq)
+    prices = [i["price"] for i in items] or [base]
     # 每日额度一起给前端：不然群友点「买」被拒了才知道今天买过，
     # 看着像 bug，其实只是额度用完了（打土豪那边早就是「还能出手 N/M 次」的写法）。
     limit = int(cfg.get("luxury_daily_limit", 2) or 2)
     used = luxury_count_today(db, qq)
-    return {"qq": qq, "equity": round(eq, 2), "price": price,
+    return {"qq": qq, "equity": round(eq, 2), "price": base, "base": base,
+            "min_price": min(prices), "max_price": max(prices),
             "cash": round(_cash(db, qq), 2), "rep": round(_rep(db, qq), 2),
-            "tier": tiers.tier_name(eq), "items": LUXURY,
+            "tier": tiers.tier_name(eq), "items": items,
             "used": used, "limit": limit, "left": max(0, limit - used),
             "full": used >= limit}
 
@@ -553,11 +610,13 @@ def luxury_buy(db, cfg, qq, key):
     if me is None:
         return False, "你还没有开户，先在群里发一次「炒股」", None
     key = str(key or "").strip()
+    eq = _equity(db, cfg, qq)
     if not key or key in ("清单", "列表", "?"):
         st = luxury_status(db, cfg, qq)
-        lines = luxury_list(cfg)
-        lines.append("· 你现在净值 %.0f，一单大约 %.0f 元（声望 %.1f）"
-                     % (st["equity"], st["price"], st["rep"]))
+        lines = luxury_list(cfg, eq)
+        lines.append("· 你现在净值 %s 元，基准价 %s 元（顶配 %s 元），声望 %.1f"
+                     % (_yuan(st["equity"]), _yuan(st["base"]),
+                        _yuan(st["max_price"]), st["rep"]))
         lines.append("👉 发「挥霍 豪宅」之类，直接买；发「挥霍 随机」让系统替你挑")
         return True, "\n".join(lines), {"list": True}
     item = None
@@ -566,7 +625,12 @@ def luxury_buy(db, cfg, qq, key):
             item = i
             break
     if item is None and key in ("随机", "随便", "来一个", "all"):
-        item = random.choice(LUXURY)
+        # 【v4.13.2】随机只在买得起的档次里挑。分了档以后随机到顶配
+        # 却报「钱不够」，看起来像功能坏了 —— 穷人就该买便宜的排面。
+        cash = _cash(db, qq)
+        affordable = [i for i in LUXURY if luxury_price(cfg, eq, i) <= cash]
+        item = random.choice(affordable) if affordable else \
+            min(LUXURY, key=lambda i: luxury_price(cfg, eq, i))
     if item is None:
         for i in LUXURY:
             if key and (key in i["name"] or key in i["key"] or key in (i.get("alias") or "")):
@@ -576,8 +640,7 @@ def luxury_buy(db, cfg, qq, key):
         return False, ("没有这一项。现有：%s" % "、".join(
             "%s%s(%s)" % (i["emoji"], i["name"], i.get("alias") or i["key"])
             for i in LUXURY)), None
-    eq = _equity(db, cfg, qq)
-    price = luxury_price(cfg, eq)
+    price = luxury_price(cfg, eq, item)
     # 【v4.9】每日额度：次数 + 总额。没有这个，声望可以无限刷，
     # 刷满抗抢保护后打土豪对这个人永久失效（等于把核心玩法关掉）。
     lim = int(cfg.get("luxury_daily_limit", 2) or 2)
@@ -591,8 +654,11 @@ def luxury_buy(db, cfg, qq, key):
         if spent + price > cap:
             return False, ("今天挥霍额度 %.0f 元已经用完（已花 %.0f），明天再来"
                            % (cap, spent)), None
-    if _cash(db, qq) < price:
-        return False, ("买 %s 要 %.0f 元，钱不够" % (item["name"], price)), None
+    cash = _cash(db, qq)
+    if cash < price:
+        return False, ("买 %s（%s档）要 %s 元，钱不够 —— 你只有 %s 元，还差 %s 元"
+                       % (item["name"], item.get("tier") or "", _yuan(price),
+                          _yuan(cash), _yuan(price - cash))), None
     db.ex("UPDATE users SET cash=cash-? WHERE qq=?", (price, qq))
     _ledger(db, qq, -price, "%s·%s" % (LUX_MARK, item["name"]))
     pool_ratio = float(cfg.get("luxury_pool_ratio", 0.8))
@@ -603,14 +669,15 @@ def luxury_buy(db, cfg, qq, key):
     _add_rep(db, qq, float(item["rep"]))
     rep = _rep(db, qq)
     protect = min(0.30, rep * 0.015)
-    msg = ("%s %s到手！\n· 花了 %.0f 元（净值的 %.0f%%）\n"
+    msg = ("%s %s到手！（%s档）\n· 花了 %s 元（净值的 %.1f%%）\n"
            "· 声望 +%d → %.1f（被打劫成功率 -%.1f%%，每天掉 5%% 点）\n"
-           "· %.0f 元进全民分红池，%.0f 元直接销毁（防通胀）" % (
-               item["emoji"], item["name"], price,
+           "· %s 元进全民分红池，%s 元直接销毁（防通胀）" % (
+               item["emoji"], item["name"], item.get("tier") or "", _yuan(price),
                (price / eq * 100) if eq > 0 else 0.0,
-               item["rep"], rep, protect * 100, to_pool, burned))
+               item["rep"], rep, protect * 100, _yuan(to_pool), _yuan(burned)))
     msg += "\n· " + item["desc"]
     return True, msg, {"item": item["name"], "price": price, "rep": rep,
+                       "tier": item.get("tier") or "",
                        "pool": to_pool, "burned": burned}
 
 # ================================================================ 全民分红池
