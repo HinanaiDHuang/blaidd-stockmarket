@@ -69,7 +69,8 @@ CREATE TABLE IF NOT EXISTS positions(
     leverage REAL NOT NULL,
     margin REAL NOT NULL,
     opened_at INTEGER NOT NULL,
-    status TEXT NOT NULL DEFAULT 'open'
+    status TEXT NOT NULL DEFAULT 'open',
+    small INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS trades(
@@ -83,7 +84,8 @@ CREATE TABLE IF NOT EXISTS trades(
     leverage REAL NOT NULL,
     fee REAL NOT NULL,
     pl REAL NOT NULL,
-    ts INTEGER NOT NULL
+    ts INTEGER NOT NULL,
+    small INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS loans(
@@ -295,6 +297,22 @@ CREATE INDEX IF NOT EXISTS idx_reminder_qq ON reminders(qq, hit);
 CREATE INDEX IF NOT EXISTS idx_order_qq ON orders(qq, status);
 CREATE INDEX IF NOT EXISTS idx_vote_day ON company_votes(day, n);
 CREATE INDEX IF NOT EXISTS idx_ach_qq ON achievements(qq);
+
+-- v4.18 每日定投计划。
+-- 【为什么要这张表】低门槛炒股入口（快捷下单）解决了「买不起 / 不会算股数」，
+-- 但玩家还是得自己记得每天点一下 —— 于是又回到「只签到不炒股」。
+-- 定投把这个动作交给系统：每天自动买一点，把时间攒出来。
+-- cid = 0 表示「每天从推荐池里自动挑一只」，否则固定买这一只。
+CREATE TABLE IF NOT EXISTS auto_invest(
+    qq TEXT PRIMARY KEY,
+    cid INTEGER NOT NULL DEFAULT 0,
+    amount REAL NOT NULL DEFAULT 0,
+    leverage INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL DEFAULT 0,
+    last_run INTEGER NOT NULL DEFAULT 0,
+    last_day TEXT NOT NULL DEFAULT '',
+    active INTEGER NOT NULL DEFAULT 1
+);
 """
 
 REGISTRY_SCHEMA = """
@@ -400,6 +418,16 @@ class GroupDB:
             # 由 auto_liquidate 按「逾期」处理。
             self.ex("UPDATE users SET bankrupt_since=bankrupt_ts "
                     "WHERE bankrupt=1 AND bankrupt_since=0 AND bankrupt_ts>0")
+        except sqlite3.Error:
+            pass
+        # v4.18：试水仓标记。金额小于阈值的碎股单算「试水仓」，
+        # 不计入每日任务 / 翻身任务 / 交易类成就（防止刷奖励套利）。
+        # 老库补列，默认 0 = 以前的单子全是正常单，行为不变。
+        try:
+            for tbl in ("trades", "positions"):
+                cols = {r["name"] for r in self.q("PRAGMA table_info(%s)" % tbl)}
+                if "small" not in cols:
+                    self.ex("ALTER TABLE %s ADD COLUMN small INTEGER NOT NULL DEFAULT 0" % tbl)
         except sqlite3.Error:
             pass
         # v4.1：快讯题材（财报/监管/资金/国际…）。老库补列。

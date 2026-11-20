@@ -134,7 +134,12 @@
     rob: null, luxury: null, dividend: null, wealth: null,
     fund: null, fundBet: null, fundBoard: [], fundBets: [],
     openPanel: null, loaded: {}, msg: {}, changelog: null,
-    groups: [], switching: false
+    groups: [], switching: false,
+    // 【v4.18】快捷模式 + 每日定投
+    mode: "manual", picks: [], pickCid: null, pickReason: "", qPlan: null,
+    qAmount: 100, qLev: 1, maxLev: 3, qNote: "",
+    tiers: [20, 50, 100, 200, 500],
+    auto: null, autoAmt: 100, autoLev: 1, autoOpen: false
   };
 
   /* ---------------------------------------------------------- 工具 */
@@ -341,6 +346,11 @@
 
   function resizeCanvas() {
     var r = cv.getBoundingClientRect();
+    /* 【坑】切到别的标签页时行情面板是 display:none，量出来宽高都是 0。
+       这时候如果照着 0 去设 canvas 的 width/height，画布就被清成 1×1 ——
+       等切回「行情」页，图是空白的，直到下一次 5 秒轮询才重画出来。
+       所以量到 0 就直接跳过，别碰画布尺寸。 */
+    if (!r.width || !r.height) return;
     var dpr = window.devicePixelRatio || 1;
     W = r.width; H = r.height;
     cv.width = Math.max(1, Math.round(W * dpr));
@@ -1067,6 +1077,8 @@
     renderMyCo();
     renderLedger();
     renderCalc();
+    renderAutoTargets();
+    renderAutoStatus();
     renderOrders();
     renderCoupons();
     renderVote();
@@ -1206,6 +1218,319 @@
       })
       .catch(function (e) { toast(e.message); })
       .then(function () { S.busy = false; });
+  }
+
+  /* ---------------------------------------------------------- 快捷模式（v4.18） */
+  /* 【为什么要这一套】老入口对新人不友好：得自己算「能买几股」（算错了不是
+     被拒就是剩一堆现金躺着）、得自己翻两百多只票、还得记得每天点一下。
+     于是很多人只签到不炒股。快捷模式把整条链路压到 5 秒：
+     选一只推荐票 → 选个金额档 → 点一下就成交。 */
+  function stars(n) {
+    n = Math.max(0, Math.min(3, Number(n) || 0));
+    var s = "";
+    for (var i = 0; i < 3; i++) s += (i < n) ? "★" : "☆";
+    return s;
+  }
+
+  function switchMode(mode) {
+    S.mode = (mode === "quick") ? "quick" : "manual";
+    var btns = document.querySelectorAll(".mode-btn");
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].classList.toggle("active", btns[i].getAttribute("data-mode") === S.mode);
+    }
+    $("ordManual").hidden = S.mode !== "manual";
+    $("ordQuick").hidden = S.mode !== "quick";
+    if (S.mode === "quick") {
+      if (!S.picks.length) loadPicks();
+      else { renderPicks(); renderQuickCalc(); }
+    } else {
+      renderCalc();
+    }
+  }
+
+  function loadPicks(refresh) {
+    var box = $("quickPicks");
+    if (box) box.innerHTML = '<div class="pick-empty">正在挑票…</div>';
+    return get("/api/picks", refresh ? "n=3&refresh=1" : "n=3")
+      .then(function (d) {
+        S.picks = (d && d.items) || [];
+        S.pickReason = (d && d.reason) || "";
+        if (!S.picks.length) {
+          if (box) {
+            box.innerHTML = '<div class="pick-empty">' +
+              esc(S.pickReason || "现在没有适合开仓的票") + "</div>";
+          }
+          $("qkReason").textContent = "";
+          S.qPlan = null;
+          renderQuickCalc();
+          return;
+        }
+        var keep = S.pickCid;
+        var found = false;
+        for (var i = 0; i < S.picks.length; i++) {
+          if (S.picks[i].cid === keep) { found = true; break; }
+        }
+        if (!found) S.pickCid = S.picks[0].cid;
+        renderPicks();
+        loadPlan();
+      })
+      .catch(function (e) {
+        if (box) {
+          box.innerHTML = '<div class="pick-empty">推荐票没拉到 —— ' +
+            "点上面「📝 手动」照样能正常下单</div>";
+        }
+        netHint(e);
+      });
+  }
+
+  function renderPicks() {
+    var box = $("quickPicks");
+    if (!box) return;
+    var h = "";
+    for (var i = 0; i < S.picks.length; i++) {
+      var p = S.picks[i];
+      h += '<button class="pick' + (p.cid === S.pickCid ? " active" : "") +
+        '" type="button" data-pcid="' + p.cid + '">' +
+        '<div class="pick-r1"><span class="pick-name">' + esc(p.name) + "</span>" +
+        '<span class="pick-risk r' + p.risk + '">' + stars(p.risk) +
+        "<em>" + esc(p.risk_text || "") + "</em></span></div>" +
+        '<div class="pick-r2"><span class="pick-px">' + px(p.price) + "</span>" +
+        '<span class="pick-chg ' + cls(p.chg) + '">' + pct(p.chg) + "</span>" +
+        '<span class="pick-amp">振幅 ' + Number(p.amp).toFixed(1) + "%</span></div>" +
+        '<div class="pick-why" title="' + esc(p.reason || "") + '">' +
+        esc(p.reason || "") + "</div>" +
+        "</button>";
+    }
+    box.innerHTML = h;
+    $("qkReason").textContent = S.pickReason || "";
+  }
+
+  function renderAmtPills() {
+    var box = $("amtPills");
+    if (!box) return;
+    var sig = S.tiers.join(",") + "|" + S.qAmount;
+    if (box.getAttribute("data-sig") === sig) return;
+    box.setAttribute("data-sig", sig);
+    var h = "";
+    for (var i = 0; i < S.tiers.length; i++) {
+      var t = S.tiers[i];
+      h += '<button class="pill' + (t === S.qAmount ? " active" : "") +
+        '" type="button" data-amt="' + t + '">' + t + " 元</button>";
+    }
+    box.innerHTML = h;
+  }
+
+  function renderQuickLev() {
+    var box = $("quickLev");
+    if (!box) return;
+    var sig = String(S.qLev);
+    if (box.getAttribute("data-sig") === sig) return;
+    box.setAttribute("data-sig", sig);
+    var h = "";
+    for (var i = 1; i <= 3; i++) {
+      h += '<button class="pill' + (i === S.qLev ? " active" : "") +
+        '" type="button" data-qlev="' + i + '">' + i + " 倍</button>";
+    }
+    box.innerHTML = h;
+  }
+
+  var _planTimer = null;
+  function loadPlan() {
+    if (!S.pickCid) return;
+    var cid = S.pickCid, amt = S.qAmount, lev = S.qLev;
+    clearTimeout(_planTimer);
+    _planTimer = setTimeout(function () {
+      get("/api/quick/plan", "cid=" + cid + "&amount=" + amt + "&leverage=" + lev)
+        .then(function (d) {
+          // 回来的不是当前这一单了就丢掉（用户可能已经改过）
+          if (S.pickCid !== cid || S.qAmount !== amt || S.qLev !== lev) return;
+          S.qPlan = d;
+          if (d && d.max_lev) S.maxLev = d.max_lev;
+          // 这个金额档买不起这只票 —— 主动换到买得起的那只，
+          // 别把人卡在「点了没反应」上。换不到就如实说，让人自己择。
+          if (d && !d.ok && d.need) {
+            var alt = pickAffordable(amt);
+            if (alt && alt.cid !== S.pickCid) {
+              S.qNote = "已换到「" + alt.name + "」—— 这个价位你买得起";
+              S.pickCid = alt.cid;
+              renderPicks();
+              return loadPlan();
+            }
+          }
+          renderQuickCalc();
+        })
+        .catch(function () {});
+    }, 200);
+  }
+
+  // 当前金额档下买得起的推荐票（按最大杠杆算 —— 服务端会自动升档）
+  function pickAffordable(amt) {
+    var maxLev = S.maxLev || 3;
+    for (var i = 0; i < S.picks.length; i++) {
+      var p = S.picks[i];
+      if (Number(p.price) <= amt * maxLev + 1e-9) return p;
+    }
+    return null;
+  }
+
+  function renderQuickCalc() {
+    var el = $("quickCalc");
+    if (!el) return;
+    var btn = $("btnQuickBuy");
+    var p = S.qPlan;
+    if (!p) {
+      el.innerHTML = "选一只票、选个金额就能买";
+      if (btn) btn.disabled = true;
+      return;
+    }
+    if (!p.ok) {
+      el.innerHTML = '<span class="qk-warn">' + esc(p.msg || "这一单下不了") + "</span>" +
+        (S.qNote ? '<br><span class="qk-note">' + esc(S.qNote) + "</span>" : "");
+      if (btn) btn.disabled = true;
+      return;
+    }
+    el.innerHTML =
+      "买入 <b>" + p.qty + " 股</b> @ " + px(p.price) +
+      "　市值 <b>" + fmt(p.cost) + "</b>　占用保证金 <b>" + fmt(p.margin) + "</b><br>" +
+      "日内波动大约 <b class=\"qkw\">±" + fmt(p.wave) + " 元</b>（" +
+      Number(p.vol).toFixed(1) + "%）　手续费 " + fmt(p.fee) +
+      (p.lev_note ? "<br><span class=\"qk-note\">" + esc(p.lev_note) + "</span>" : "") +
+      (S.qNote ? '<br><span class="qk-note">' + esc(S.qNote) + "</span>" : "");
+    if (btn) btn.disabled = false;
+  }
+
+  function doQuickBuy() {
+    if (S.busy) return;
+    if (!S.pickCid) { toast("先选一只票"); return; }
+    S.busy = true;
+    post("/api/quick", { cid: S.pickCid, amount: S.qAmount, leverage: S.qLev })
+      .then(function (d) {
+        toast(d.msg);
+        if (d.me) S.me = d.me;
+        return refreshState();
+      })
+      .catch(function (e) { toast(e.message); })
+      .then(function () { S.busy = false; loadPlan(); });
+  }
+
+  /* ---------------------------------------------------------- 每日定投 */
+  function loadAuto() {
+    return get("/api/auto")
+      .then(function (d) {
+        S.auto = (d && d.plan) || null;
+        if (d && d.tiers && d.tiers.length) {
+          var t = [];
+          for (var i = 0; i < d.tiers.length; i++) t.push(Number(d.tiers[i]));
+          S.tiers = t;
+        }
+        if (S.auto) {
+          S.autoAmt = Number(S.auto.amount);
+          S.autoLev = Number(S.auto.leverage);
+        }
+        renderAutoAmt();
+        renderAutoLev();
+        renderAutoStatus();
+      })
+      .catch(function () {});
+  }
+
+  function renderAutoTargets() {
+    var sel = $("autoTarget");
+    if (!sel) return;
+    var cur = null;
+    for (var i = 0; i < S.companies.length; i++) {
+      if (S.companies[i].id === S.cid) { cur = S.companies[i]; break; }
+    }
+    var sig = cur ? String(cur.id) : "0";
+    if (sel.getAttribute("data-sig") === sig) return;
+    sel.setAttribute("data-sig", sig);
+    var keep = sel.value;
+    var opts = '<option value="0">🎲 每天自动挑一只</option>';
+    if (cur) opts += '<option value="' + cur.id + '">📌 固定买 ' + esc(cur.name) + "</option>";
+    sel.innerHTML = opts;
+    sel.value = (keep === "0" || (cur && Number(keep) === cur.id)) ? keep : "0";
+  }
+
+  function renderAutoAmt() {
+    var box = $("autoAmt");
+    if (!box) return;
+    var sig = S.tiers.join(",") + "|" + S.autoAmt;
+    if (box.getAttribute("data-sig") === sig) return;
+    box.setAttribute("data-sig", sig);
+    var h = "";
+    for (var i = 0; i < S.tiers.length; i++) {
+      var t = S.tiers[i];
+      h += '<button class="pill' + (t === S.autoAmt ? " active" : "") +
+        '" type="button" data-aamt="' + t + '">' + t + " 元</button>";
+    }
+    box.innerHTML = h;
+  }
+
+  function renderAutoLev() {
+    var box = $("autoLev");
+    if (!box) return;
+    var sig = String(S.autoLev);
+    if (box.getAttribute("data-sig") === sig) return;
+    box.setAttribute("data-sig", sig);
+    var h = "";
+    for (var i = 1; i <= 3; i++) {
+      h += '<button class="pill' + (i === S.autoLev ? " active" : "") +
+        '" type="button" data-alev="' + i + '">' + i + " 倍</button>";
+    }
+    box.innerHTML = h;
+  }
+
+  function renderAutoStatus() {
+    var st = $("autoStatus");
+    var on = $("btnAutoSet");
+    var off = $("btnAutoOff");
+    var lead = $("autoLeadTitle");
+    var sub = $("autoLeadSub");
+    var openBtn = $("btnAutoOpen");
+    var detail = $("autoDetail");
+    if (S.auto) {
+      var what = S.auto.cid ? "固定买这一只" : "每天自动挑一只";
+      var mark = S.auto.last_day ? "今天已投" : "今天还没投";
+      if (lead) lead.textContent = "已开启 · 每天 " + fmt(S.auto.amount) + " 元 · " + S.auto.leverage + " 倍";
+      if (sub) sub.textContent = what + "　" + mark;
+      if (openBtn) openBtn.textContent = "管理";
+      if (st) {
+        st.hidden = false;
+        st.innerHTML = "✅ 已开启 · 每天 " + fmt(S.auto.amount) + " 元 · " +
+          S.auto.leverage + " 倍 · " + what + "　" +
+          (S.auto.last_day
+            ? '<span class="auto-today">今天已投</span>'
+            : '<span class="auto-today todo">今天还没投</span>');
+      }
+      if (on) on.textContent = "改设置";
+      if (off) off.hidden = false;
+    } else {
+      if (lead) lead.textContent = "每天自动买一点，连点都不用点";
+      if (sub) sub.textContent = "";
+      if (openBtn) openBtn.textContent = "开启";
+      if (st) { st.hidden = true; st.innerHTML = ""; }
+      if (on) on.textContent = "开启定投";
+      if (off) off.hidden = true;
+    }
+    if (detail) detail.hidden = !S.autoOpen;
+    if (openBtn) openBtn.hidden = !!S.autoOpen;
+  }
+
+  function doAutoSet() {
+    var cid = Number($("autoTarget").value) || 0;
+    post("/api/auto", { cid: cid, amount: S.autoAmt, leverage: S.autoLev })
+      .then(function (d) {
+        toast(d.msg);
+        S.autoOpen = false;
+        return loadAuto();
+      })
+      .catch(function (e) { toast(e.message); });
+  }
+
+  function doAutoOff() {
+    post("/api/auto", {}, "DELETE")
+      .then(function (d) { toast(d.msg); return loadAuto(); })
+      .catch(function (e) { toast(e.message); });
   }
 
   function doClose(pid) {
@@ -2123,6 +2448,10 @@
     document.querySelectorAll(".pane").forEach(function (p) { p.classList.remove("active"); });
     var pane = $("pane-" + name);
     if (pane) pane.classList.add("active");
+    /* 切回「行情」页要把 K 线重画一遍。
+       画布在隐藏时量不到尺寸（见 resizeCanvas 里的坑），
+       切回来得重新量一次再画，不然会空着好几秒。 */
+    if (name === "market") { resizeCanvas(); draw(); }
     window.scrollTo(0, 0);
   }
   document.querySelectorAll(".tab").forEach(function (btn) {
@@ -2136,6 +2465,78 @@
       S.side = btn.getAttribute("data-side");
       renderCalc();
     });
+  });
+
+  /* 【v4.18】快捷模式 / 每日定投 的交互绑定 */
+  document.querySelectorAll(".mode-btn").forEach(function (btn) {
+    btn.addEventListener("click", function () { switchMode(btn.getAttribute("data-mode")); });
+  });
+
+  /* 「换一批」：跳过服务端 60 秒缓存，把前面那批好票像环一圈再推。 */
+  var rePick = $("btnRePick");
+  if (rePick) {
+    rePick.addEventListener("click", function () {
+      if (rePick.disabled) return;
+      rePick.disabled = true;
+      rePick.textContent = "挑票中…";
+      var back = function () {
+        rePick.disabled = false;
+        rePick.textContent = "🔄 换一批";
+      };
+      loadPicks(true).then(back, back);
+    });
+  }
+
+  $("quickPicks").addEventListener("click", function (e) {
+    var el = e.target.closest ? e.target.closest("[data-pcid]") : null;
+    if (!el) return;
+    var cid = Number(el.getAttribute("data-pcid"));
+    S.pickCid = cid;
+    S.qNote = "";
+    renderPicks();
+    loadPlan();
+    selectCompany(cid);
+  });
+
+  $("amtPills").addEventListener("click", function (e) {
+    var el = e.target.closest ? e.target.closest("[data-amt]") : null;
+    if (!el) return;
+    S.qAmount = Number(el.getAttribute("data-amt"));
+    S.qNote = "";
+    renderAmtPills();
+    loadPlan();
+  });
+
+  $("quickLev").addEventListener("click", function (e) {
+    var el = e.target.closest ? e.target.closest("[data-qlev]") : null;
+    if (!el) return;
+    S.qLev = Number(el.getAttribute("data-qlev"));
+    S.qNote = "";
+    renderQuickLev();
+    loadPlan();
+  });
+
+  $("btnQuickBuy").addEventListener("click", doQuickBuy);
+
+  $("autoAmt").addEventListener("click", function (e) {
+    var el = e.target.closest ? e.target.closest("[data-aamt]") : null;
+    if (!el) return;
+    S.autoAmt = Number(el.getAttribute("data-aamt"));
+    renderAutoAmt();
+  });
+
+  $("autoLev").addEventListener("click", function (e) {
+    var el = e.target.closest ? e.target.closest("[data-alev]") : null;
+    if (!el) return;
+    S.autoLev = Number(el.getAttribute("data-alev"));
+    renderAutoLev();
+  });
+
+  $("btnAutoSet").addEventListener("click", doAutoSet);
+  $("btnAutoOff").addEventListener("click", doAutoOff);
+  $("btnAutoOpen").addEventListener("click", function () {
+    S.autoOpen = !S.autoOpen;
+    renderAutoStatus();
   });
 
   $("levRange").addEventListener("input", function () {
@@ -2358,6 +2759,12 @@
   resizeCanvas();
   $("btnPeek").textContent = "🔮 买内幕消息（" + (S.cfg.peek_cost || 800) + " 元）";
   loadGroups();
+  /* 【v4.18】先把两套控件的默认值铺好，再去拉数据 */
+  renderAmtPills();
+  renderQuickLev();
+  renderAutoAmt();
+  renderAutoLev();
+  loadAuto();
   refreshState().then(function () {
     return refreshCandles();
   }).then(function () {

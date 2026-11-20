@@ -57,7 +57,10 @@ def _cond_checkin(db, qq):
 
 
 def _cond_trade(db, qq):
-    return _count(db, "SELECT COUNT(*) c FROM trades WHERE qq=? AND ts>=?", qq,
+    # 【v4.18】small=1 = 试水仓（保证金占用低于阈值的小单）。
+    # 这类单不计入任务奖励 —— 否则 20 元小单就能刷「今日首单 125」+
+    # 「翻身第一笔买入 200~1200」，变成 66 倍的刷分机器。
+    return _count(db, "SELECT COUNT(*) c FROM trades WHERE qq=? AND ts>=? AND small=0", qq,
                   features.day_start()) > 0
 
 
@@ -72,11 +75,14 @@ def _cond_remind(db, qq):
 
 
 def _cond_hold3(db, qq):
-    return _count(db, "SELECT COUNT(*) c FROM positions WHERE qq=? AND status='open'", qq) >= 3
+    # 【v4.18】试水仓不计入「同时持三只」—— 免得 3 笔 20 元小单就凑齐任务。
+    return _count(db, "SELECT COUNT(*) c FROM positions WHERE qq=? AND status='open' AND small=0",
+                  qq) >= 3
 
 
 def _cond_close(db, qq):
-    return _count(db, "SELECT COUNT(*) c FROM trades WHERE qq=? AND ts>=? AND kind='close'",
+    # 【v4.18】试水仓平仓同样不计入。
+    return _count(db, "SELECT COUNT(*) c FROM trades WHERE qq=? AND ts>=? AND kind='close' AND small=0",
                   qq, features.day_start()) > 0
 
 

@@ -39,6 +39,7 @@ import coupons
 import fun
 import orders
 import recovery
+import quick
 import wealth
 import tycoon
 import whale
@@ -117,6 +118,21 @@ TOKEN_TTL = 60 * 60 * 24 * int(CFG.get("token_ttl_days", 7))
 # 每次发版往里加一段（最新的放最前面）。
 # 主人明说不要在群里发公告，那就把变更说清楚放网页上。
 CHANGELOG = [
+    {
+        "ver": "v4.18",
+        "date": "2026-11-20",
+        "title": "炒股终于有「新手入口」了：20 元也能开仓，还能一键定投",
+        "items": [
+            "以前想试水炒股，卡在两件事上：一是得自己算「能买几股」—— 股价 25 元的票、钱包只有 200 元，算错了不是被拒就是剩一堆现金躺着；二是得自己在两百多只票里翻，找到该买哪只还得看半天。现在下单卡片加了「⚡ 快捷」模式：先给你推 3 只票（按今天的换手活跃度和日内波动筛的，每只都写清楚为什么推它、风险几星），选个金额档就成交，5 秒搞定",
+            "金额按「你掏出来的本金」算，不是成交额：投入 100 元、配 2 倍杠杆，就是买 200 元市值的股票、占用 100 元保证金。界面上直接写清楚「买几股 · 占用多少 · 预计日内波动 ±多少元」，你看到什么就下什么",
+            "本金不够买 1 股的时候（比如 20 元本金遇上 25 元的票）会自动把杠杆升到刚好买得起 1 股的最低档，并且明说「这票 25 元，20 元本金要 2 倍杠杆才买得起 1 股」—— 不用自己在那儿心算",
+            "快捷模式只给 1/2/3 倍杠杆。想要 20 倍梭哈的请走「📝 手动」那边，滑杆和风险提示都在",
+            "新增「🔁 每日定投」：设好金额和倍数，每天早上自动买一点（也可以指定只买某一只）。想省事的人连点都不用点，结果在网页通知里看",
+            "碎股小单不算数，这是防止有人拿 20 元刷分：每日任务「今日首单 125」+ 翻身任务「第一笔买入 200~1200」+ 成就「第一笔交易 300」加起来一千多块，20 元小单要是也能领就是 66 倍套利。所以保证金占用低于 200 元的单子算「试水仓」—— 照样能赚能亏，但不计入每日任务、翻身任务和交易类成就",
+            "试水仓也有正反馈：新增一次性成就「⚡ 初试锋芒」（50 元），第一次小额下手就有回报",
+            "判定口径是「你真金白银押进去多少」（保证金），不是成交额 —— 杠杆能把成交额放大 20 倍，看成交额就能绕过闸；而且判定放在下单核心里，手动下单、条件单、快捷下单一视同仁，绕不掉",
+        ],
+    },
     {
         "ver": "v4.17",
         "date": "2026-11-20",
@@ -1516,6 +1532,95 @@ def api_close():
     if not okk:
         return fail(msg)
     return ok({"msg": msg, "info": info, "me": market.account(handle, CFG, uid)}, msg)
+
+
+# ---------------------------------------------------------------- 快捷炒股（v4.18）
+@app.route("/api/picks")
+def api_picks():
+    """推荐票：给「不会选股」的人一个能立刻下手的入口。
+
+    服务端按群缓存 60 秒 —— 前端每 2 秒轮询一次，
+    推荐票要是每次重算，玩家会看到列表不停换，根本没法下手。
+    """
+    gid = request.args.get("g", "0")
+    uid = request.args.get("u", "")
+    token = request.args.get("t", "")
+    handle, uid, err = get_ctx(gid, uid, token)
+    if err:
+        return err
+    if not _rate_ok("read", int(CFG.get("read_limit_per_min", 240)), ident=uid):
+        return fail("刷新太频繁，稍等一下再试", 429)
+    n = request.args.get("n", 3, type=int)
+    # 「换一批」：用户主动要新的推荐，跳过 60 秒缓存。
+    # 缓存是给 2 秒轮询用的；主动换一批还等缓存就形同虚设。
+    refresh = request.args.get("refresh", "0") in ("1", "true", "yes")
+    return ok(quick.pick_stocks(handle, CFG, gid=gid, n=n, force=refresh, refresh=refresh))
+
+
+@app.route("/api/quick/plan")
+def api_quick_plan():
+    """下单前预览：买多少股、占用多少保证金、预计日内波动多少。
+
+    「本金不够买 1 股时自动升杠杆」的逻辑只有服务端知道，
+    所以预览也走服务端算，界面上显示什么就真下什么。
+    """
+    gid = request.args.get("g", "0")
+    uid = request.args.get("u", "")
+    token = request.args.get("t", "")
+    handle, uid, err = get_ctx(gid, uid, token)
+    if err:
+        return err
+    cid = request.args.get("cid", type=int)
+    amount = request.args.get("amount", 100, type=float)
+    leverage = request.args.get("leverage", 1, type=int)
+    return ok(quick.plan_order(handle, CFG, uid, cid, amount, leverage))
+
+
+@app.route("/api/quick", methods=["POST"])
+def api_quick():
+    """快捷买入：按金额下单，5 秒完成一次有波动有盈亏的操作。"""
+    j = request.get_json(silent=True) or {}
+    guard = _trade_guard()
+    if guard:
+        return guard
+    handle, uid, err = get_ctx(j.get("g"), j.get("u"), j.get("t"))
+    if err:
+        return err
+    okk, msg, info = quick.quick_buy(handle, CFG, uid, j.get("cid"), j.get("amount"),
+                                     j.get("leverage", 1))
+    if not okk:
+        return fail(msg)
+    return ok({"msg": msg, "info": info, "me": market.account(handle, CFG, uid)}, msg)
+
+
+@app.route("/api/auto", methods=["GET", "POST", "DELETE"])
+def api_auto():
+    """每日定投：把这 5 秒也省掉 —— 每天自动买一点。"""
+    if request.method == "GET":
+        gid = request.args.get("g", "0")
+        uid = request.args.get("u", "")
+        token = request.args.get("t", "")
+        handle, uid, err = get_ctx(gid, uid, token)
+        if err:
+            return err
+        st = quick.auto_get(handle, uid)
+        return ok({"plan": st, "tiers": quick.amount_tiers(CFG),
+                   "max_leverage": int(CFG.get("quick_max_leverage", 3) or 3)})
+    j = request.get_json(silent=True) or {}
+    guard = _trade_guard()
+    if guard:
+        return guard
+    handle, uid, err = get_ctx(j.get("g"), j.get("u"), j.get("t"))
+    if err:
+        return err
+    if request.method == "DELETE":
+        okk, msg, _ = quick.auto_clear(handle, uid)
+        return ok({"msg": msg, "plan": None})
+    okk, msg, st = quick.auto_set(handle, CFG, uid, j.get("cid", 0), j.get("amount"),
+                                  j.get("leverage", 1))
+    if not okk:
+        return fail(msg)
+    return ok({"msg": msg, "plan": st}, msg)
 
 
 @app.route("/api/borrow", methods=["POST"])
@@ -3043,6 +3148,37 @@ def _push_liq_notice(qq, text):
         return False
 
 
+# 每日定投的节流状态（按群记最后一次执行时间）
+_AUTO_LAST = {}
+
+
+def _auto_run_daily(handle, gid):
+    """跑这一群所有人的每日定投。
+
+    每天 09:05 之后跑一次 —— 早上买能吃一整天行情，
+    也不会撞上收盘前那段漂移推送窗口（23:55~24:00）。
+    """
+    try:
+        lt = time.localtime()
+        if lt.tm_hour < 9 or lt.tm_hour >= 22:
+            return
+        today = time.strftime("%Y-%m-%d")
+        if handle.get_meta("auto_day", "") == today:
+            return
+        now_ts = int(time.time())
+        last = _AUTO_LAST.get(gid, 0)
+        if now_ts - last < 30:
+            return
+        _AUTO_LAST[gid] = now_ts
+        n = quick.auto_run_all(handle, CFG)
+        # 跑完再落标记：万一中间抛异常，这一轮还能重试。
+        handle.set_meta("auto_day", today)
+        if n:
+            print("[stockmarket] auto-invest %s: %d 人" % (gid, n), flush=True)
+    except Exception as exc:
+        print("[stockmarket] auto-invest error:", exc, flush=True)
+
+
 def scheduler():
     while not _stop.is_set():
         for gid in dbmod.known_groups(DATA_DIR):
@@ -3101,6 +3237,10 @@ def scheduler():
                         whale.collect_fund(handle, CFG)
                     except Exception as exc:
                         print("[stockmarket] settle_day error:", exc, flush=True)
+                # 【v4.18 每日定投】每天 09:05 之后自动跑一次。
+                # 群级 meta 去重（每个群一份），再叠一个按群的节流，
+                # 免得八个群同一秒各扫一遍全表。
+                _auto_run_daily(handle, gid)
                 # 【v4.11 性能】只扫「有可能被强平 / 破产 / 计提利息」的人：
                 #   有持仓的 + 有欠款的 + 现金已经为负的。
                 # 以前是无脑 SELECT qq FROM users 全表扫，每个用户每 tick

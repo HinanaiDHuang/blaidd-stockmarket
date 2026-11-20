@@ -24,6 +24,19 @@ def _circuit(db):
     return until, reason
 
 
+def _small_threshold(cfg):
+    """试水仓门槛：保证金占用低于这个数就算「试水仓」。
+
+    v4.18 起，碎股小单不计入每日任务 / 翻身任务 / 交易类成就，
+    免得「20 元小单」变成刷分机器。默认 200 元。
+    """
+    try:
+        v = float(cfg.get("small_order_threshold", 200) or 200)
+    except (TypeError, ValueError, AttributeError):
+        return 200.0
+    return v if v > 0 else 200.0
+
+
 def px(v):
     """价格展示精度：低价股多给几位小数。
 
@@ -492,17 +505,30 @@ def place_order(db, cfg, qq, cid, side, qty, leverage, price=None):
     fee = 0.0 if coupons.use(db, qq, "fee_free", 1) else fee_full
     db.ex("UPDATE users SET cash=cash-? WHERE qq=?", (margin + fee, qq))
     _slip_to_pool(db, cfg, slip_fee)
-    db.ex("INSERT INTO positions(qq,cid,side,qty,entry,leverage,margin,opened_at) VALUES(?,?,?,?,?,?,?,?)",
-          (qq, cid, side, qty, price, leverage, margin, now()))
-    db.ex("INSERT INTO trades(qq,cid,side,kind,qty,price,leverage,fee,pl,ts) VALUES(?,?,?,?,?,?,?,?,?,?)",
-          (qq, cid, side, "open", qty, price, leverage, fee, 0.0, now()))
+    # 【v4.18 试水仓标记】保证金占用低于阈值的单子标 small=1。
+    #
+    # 【为什么按保证金算，不按成交额算】杠杆能把成交额放大 20 倍：
+    # 20 元本金 × 20 倍杠杆 = 400 元成交额，看成交额就能绕过闸。
+    # 门槛看的是「你真金白银押进去多少」—— 也就是保证金。
+    #
+    # 【为什么必须放在下单核心里算，不能靠 API 打标】放 API 层的话，
+    # 网页手动下单那一路（/api/order）就绕过去了。奖励只在一处入口管着，
+    # 迟早被人发现漏洞。放在下单核心，手动、快捷、条件单一视同仁。
+    small = 1 if margin < _small_threshold(cfg) else 0
+    db.ex("INSERT INTO positions(qq,cid,side,qty,entry,leverage,margin,opened_at,small) "
+          "VALUES(?,?,?,?,?,?,?,?,?)",
+          (qq, cid, side, qty, price, leverage, margin, now(), small))
+    db.ex("INSERT INTO trades(qq,cid,side,kind,qty,price,leverage,fee,pl,ts,small) "
+          "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+          (qq, cid, side, "open", qty, price, leverage, fee, 0.0, now(), small))
     _ledger(db, qq, -(margin + fee), "开仓 %s %s x%d" % ("买入" if side == "long" else "卖出",
                                                      comp["name"], leverage))
     slip_note = ("，冲击成本 %.2f%%（单子太大，成交价变差）" % (slip * 100)) if slip > 0 else ""
-    return True, "已开仓：%s %s %d 股 @%.2f（杠杆 %dx，占用保证金 %.2f）%s%s" % (
+    small_note = "　【试水仓】不算今日任务和交易成就" if small else ""
+    return True, "已开仓：%s %s %d 股 @%.2f（杠杆 %dx，占用保证金 %.2f）%s%s%s" % (
         "买入" if side == "long" else "卖出", comp["name"], qty, price, leverage, margin,
-        reopen_note, slip_note), {
-        "margin": round(margin, 2), "fee": round(fee, 2)}
+        reopen_note, slip_note, small_note), {
+        "margin": round(margin, 2), "fee": round(fee, 2), "small": small}
 
 
 def close_position(db, cfg, qq, pos_id, force=False, qty=None):
@@ -567,9 +593,15 @@ def close_position(db, cfg, qq, pos_id, force=False, qty=None):
     else:
         db.ex("UPDATE positions SET qty=?, margin=? WHERE id=?",
               (total - qty, p["margin"] - margin_out, pos_id))
-    db.ex("INSERT INTO trades(qq,cid,side,kind,qty,price,leverage,fee,pl,ts) VALUES(?,?,?,?,?,?,?,?,?,?)",
+    # 【v4.18】平仓继承仓位的试水仓标记。
+    # 开仓是碎股小单，平仓也得是 —— 否则「小单开仓、大单平仓」能把标记洗掉。
+    try:
+        ps = int(p["small"] or 0)
+    except (IndexError, KeyError, TypeError, ValueError):
+        ps = 0
+    db.ex("INSERT INTO trades(qq,cid,side,kind,qty,price,leverage,fee,pl,ts,small) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
           (qq, p["cid"], p["side"], "force_close" if force else "close", qty, price,
-           p["leverage"], fee, pl, now()))
+           p["leverage"], fee, pl, now(), ps))
     _ledger(db, qq, cash_delta, ("强制平仓 " if force else "平仓 ") + comp["name"])
     tag = "强平" if force else "平仓"
     left = "" if qty >= total - 1e-9 else "（剩余 %.0f 股）" % (total - qty)

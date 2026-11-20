@@ -113,6 +113,10 @@ def checkin_status(db, cfg, qq):
 ACH_DEFS = [
     # —— 交易基本功 ——
     ("first_trade", "第一笔交易", 300.0, "你终于下手了"),
+    # 【v4.18】试水仓专属成就：第一次用小额本金下手。
+    # 金额小到不算任务奖励（small=1 的单不算任务），
+    # 所以给个一次性的小安慰奖 —— 门槛低不等于没有正反馈。
+    ("try_water", "初试锋芒", 50.0, "第一次试水买入（小额仓）"),
     ("first_profit", "第一桶金", 500.0, "有盈利了，继续"),
     ("first_loss", "交过学费", 200.0, "亏过钱也算学费"),
     ("first_short", "空军首秀", 400.0, "第一次做空"),
@@ -166,6 +170,17 @@ def _count(db, sql, args=()):
     return int(row["c"]) if row else 0
 
 
+def _is_small(trade):
+    """这一笔是不是「试水仓」（v4.18）。
+
+    老的库里 trades 表没有 small 列（迁移前的老数据），拿不到就当正常单。
+    """
+    try:
+        return int(trade["small"] or 0) == 1
+    except (IndexError, KeyError, TypeError, ValueError):
+        return False
+
+
 def check_achievements(db, cfg, qq):
     """检查并发放成就，返回新解锁的文案列表。"""
     qq = str(qq)
@@ -173,8 +188,13 @@ def check_achievements(db, cfg, qq):
     if user is None:
         return []
     have = set(r["code"] for r in db.q("SELECT code FROM achievements WHERE qq=?", (qq,)))
-    pos = db.q("SELECT * FROM positions WHERE qq=? AND status='open'", (qq,))
-    trades = db.q("SELECT * FROM trades WHERE qq=?", (qq,))
+    # 【v4.18 试水仓隔离】small=1 的单是「试水仓」：保证金占用低于 200 元。
+    # 这类单不计入交易类成就 —— 20 元小单拿 300 元「第一笔交易」就是套利。
+    # 持仓统计同样排除：3 笔 20 元的碎股不该算「广撒网」。
+    pos = db.q("SELECT * FROM positions WHERE qq=? AND status='open' AND small=0", (qq,))
+    all_trades = db.q("SELECT * FROM trades WHERE qq=?", (qq,))
+    trades = [t for t in all_trades if not _is_small(t)]
+    small_trades = [t for t in all_trades if _is_small(t)]
     industries = set()
     for p in pos:
         row = db.q1("SELECT industry FROM companies WHERE id=?", (p["cid"],))
@@ -191,10 +211,16 @@ def check_achievements(db, cfg, qq):
     # —— 交易 ——
     if trades:
         hits.add("first_trade")
-    if user["win"] > 0:
+    # 【v4.18】盈亏改成按「正常单」算，不能再用 users.win/lose ——
+    # 那两个字段把试水仓的盈亏也算进去了。
+    big_win = sum(max(0.0, float(t["pl"] or 0)) for t in closed)
+    big_lose = sum(max(0.0, -float(t["pl"] or 0)) for t in closed)
+    if big_win > 0:
         hits.add("first_profit")
-    if user["lose"] > 0:
+    if big_lose > 0:
         hits.add("first_loss")
+    if small_trades:
+        hits.add("try_water")
     if any(t["side"] == "short" for t in trades):
         hits.add("first_short")
     if any(t["side"] == "short" and float(t["pl"]) > 0 for t in closed):

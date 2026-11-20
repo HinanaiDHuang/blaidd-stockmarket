@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#0d1117">
 <title>布莱泽模拟炒股</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ctext y='26' font-size='26'%3E%F0%9F%93%88%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="/static/style.css?v=20261120d">
+<link rel="stylesheet" href="/static/style.css?v=20261120f">
 </head>
 <body>
 <div id="app">
@@ -90,36 +90,74 @@
         <span class="ord-cur" id="ordCur">现价 --</span>
       </div>
 
-      <div class="seg">
-        <button class="seg-btn long active" data-side="long">做多 · 买入</button>
-        <button class="seg-btn short" data-side="short">做空 · 卖出</button>
+      <!-- 【v4.18】手动 / 快捷 两个模式。
+           功能变多以后最怕的就是一屏按钮 —— 所以不新增卡片，
+           就在同一张下单卡里做模式切换：手动那边是老样子，
+           快捷那边是「选票 → 选金额 → 点一下」。 -->
+      <div class="ord-modes" id="ordModes">
+        <button class="mode-btn active" data-mode="manual" type="button">📝 手动下单</button>
+        <button class="mode-btn" data-mode="quick" type="button">⚡ 快捷试水</button>
       </div>
 
-      <div class="ord-field">
-        <label for="qtyInput">数量</label>
-        <input type="number" id="qtyInput" inputmode="numeric" placeholder="股数，如 100" min="1" step="100">
-        <div class="quick">
-          <button class="mini-btn" data-qty="all">全部</button>
-          <button class="mini-btn" data-qty="100">100</button>
-          <button class="mini-btn" data-qty="1000">1000</button>
+      <div id="ordManual">
+        <div class="seg">
+          <button class="seg-btn long active" data-side="long">做多 · 买入</button>
+          <button class="seg-btn short" data-side="short">做空 · 卖出</button>
         </div>
+
+        <div class="ord-field">
+          <label for="qtyInput">数量</label>
+          <input type="number" id="qtyInput" inputmode="numeric" placeholder="股数，如 100" min="1" step="100">
+          <div class="quick">
+            <button class="mini-btn" data-qty="all">全部</button>
+            <button class="mini-btn" data-qty="100">100</button>
+            <button class="mini-btn" data-qty="1000">1000</button>
+          </div>
+        </div>
+
+        <div class="ord-field">
+          <label for="levRange">杠杆</label>
+          <input type="range" id="levRange" min="1" max="20" value="1">
+          <span class="lev-val" id="levVal">1x</span>
+        </div>
+
+        <div class="calc" id="calc">预计保证金 --　手续费 --</div>
+        <div class="calc calc-tax" id="calcTax"></div>
+
+        <div class="ord-btns">
+          <button class="big-btn long" id="btnLong">买入开多</button>
+          <button class="big-btn short" id="btnShort">卖出开空</button>
+        </div>
+
+        <div class="hint">做空同样占用保证金，杠杆越高爆得越快。贴着涨跌停的股票不能建仓（平仓随时能跑）。</div>
       </div>
 
-      <div class="ord-field">
-        <label for="levRange">杠杆</label>
-        <input type="range" id="levRange" min="1" max="20" value="1">
-        <span class="lev-val" id="levVal">1x</span>
+      <!-- 快捷模式：20 元也能开仓，5 秒完成一次有波动有盈亏的操作 -->
+      <div id="ordQuick" hidden>
+        <div class="qk-head">
+          <span class="qk-title">⚡ 今日推荐</span>
+          <span class="qk-sub" id="qkReason">正在挑票…</span>
+          <button class="mini-btn qk-re" id="btnRePick" type="button">🔄 换一批</button>
+        </div>
+        <div class="picks" id="quickPicks"></div>
+        <div class="qk-tip">点一只票选中它，再选金额就能买 · 价格就是 1 股多少钱</div>
+
+        <div class="ord-field qk-field">
+          <label>投入</label>
+          <div class="pills" id="amtPills"></div>
+        </div>
+
+        <div class="ord-field qk-field">
+          <label>杠杆</label>
+          <div class="pills" id="quickLev"></div>
+        </div>
+
+        <div class="calc" id="quickCalc">选一只票、选个金额就能买</div>
+
+        <button class="big-btn quick-buy" id="btnQuickBuy" type="button">⚡ 买入</button>
+
+        <div class="hint" id="quickHint">「投入」是你掏出来的本金，杠杆决定买多少市值。快捷模式只给 1~3 倍杠杆；想梭哈请走「📝 手动」。</div>
       </div>
-
-      <div class="calc" id="calc">预计保证金 --　手续费 --</div>
-      <div class="calc calc-tax" id="calcTax"></div>
-
-      <div class="ord-btns">
-        <button class="big-btn long" id="btnLong">买入开多</button>
-        <button class="big-btn short" id="btnShort">卖出开空</button>
-      </div>
-
-      <div class="hint">做空同样占用保证金，杠杆越高爆得越快。贴着涨跌停的股票不能建仓（平仓随时能跑）。</div>
 
       <div class="ord-extra">
         <button class="ghost-btn" id="btnSabotage" hidden>🗡 商业战</button>
@@ -139,6 +177,40 @@
   </section>
 
   <section class="pane" id="pane-positions">
+    <!-- 【v4.18】每日定投：把这 5 秒也省掉。放在持仓上面 —— 想炒股的人
+         打开「交易」页第一眼就能看到，不用先去行情页翻。 -->
+    <div class="list-card auto-card">
+      <div class="list-title">🔁 每日定投<span class="list-sub">每天自动买一点，不用惦记</span></div>
+      <div class="auto-body">
+        <!-- 默认折叠成一行：功能多起来以后最怕一屏按钮 -->
+        <div class="auto-collapsed" id="autoCollapsed">
+          <div class="auto-lead">
+            <span class="auto-lead-t" id="autoLeadTitle">每天自动买一点，连点都不用点</span>
+            <span class="auto-lead-s" id="autoLeadSub"></span>
+          </div>
+          <button class="big-btn auto-btn auto-open" id="btnAutoOpen" type="button">开启</button>
+        </div>
+        <div class="auto-detail" id="autoDetail" hidden>
+          <div class="auto-row">
+            <select id="autoTarget" class="auto-sel">
+              <option value="0">🎲 每天自动挑一只</option>
+            </select>
+          </div>
+          <div class="auto-row">
+            <div class="pills" id="autoAmt"></div>
+          </div>
+          <div class="auto-row">
+            <div class="pills" id="autoLev"></div>
+            <button class="mini-btn danger auto-off" id="btnAutoOff" type="button" hidden>关掉定投</button>
+          </div>
+          <div class="auto-row">
+            <button class="big-btn auto-btn" id="btnAutoSet" type="button">开启定投</button>
+          </div>
+          <div class="auto-status" id="autoStatus" hidden></div>
+        </div>
+      </div>
+    </div>
+
     <div class="list-card">
       <div class="list-title">我的持仓</div>
       <div class="pos-list" id="posList"></div>
@@ -446,6 +518,6 @@
 
   <div class="toast" id="toast" hidden></div>
 </div>
-<script src="/static/app.js?v=20261120d"></script>
+<script src="/static/app.js?v=20261120f"></script>
 </body>
 </html>
