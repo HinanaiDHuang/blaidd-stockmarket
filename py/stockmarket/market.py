@@ -160,6 +160,96 @@ def _ledger(db, qq, delta, reason):
           (str(qq), now(), round(delta, 2), round(bal, 2), reason))
 
 
+# ---------------------------------------------------------------- 冲击成本
+def _day_turnover(db, cid, price):
+    """该股当日累计成交额（元）。K 线里记的是成交量，乘现价折成金额。"""
+    try:
+        row = db.q1("SELECT SUM(v) s FROM candles WHERE cid=? AND ts>=?",
+                    (int(cid), day_start()))
+    except Exception:
+        return 0.0
+    try:
+        vol = float(row["s"] or 0) if row else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+    return vol * float(price or 0)
+
+
+def impact_slip(db, cfg, cid, notional, price):
+    """冲击成本：本单越大，成交价越差（买贵 / 卖便宜）。
+
+    【为什么必须有这个】
+    20 倍杠杆 + 满仓（现金全当保证金）= 每笔都是「全副身家押一个方向」。
+    行情只要有一点点系统性偏差，这个组合就能滚出指数级复利 —— 现网实锤：
+    主群 Kaito 两天从 1300 万涨到 534.57 亿，232 笔平仓 221 笔盈利（95.3%），
+    赢/亏比 267000:1；而当天全群 216 人合计现金不到 1000 万。
+    冲击成本让「大钱」付出代价：单子越接近把整只票的成交额吃掉，
+    成交价越差，其中一部分直接进全民分红池 —— 富豪的钱流回普通人手里。
+
+    小资金完全不受影响：占该股当日成交额 0.01% 时滑点约等于 0。
+
+    返回滑点率（0 ~ impact_slip_cap）。
+    """
+    try:
+        k = float(cfg.get("impact_slip_k", 0) or 0)
+    except (TypeError, ValueError):
+        k = 0.0
+    if k <= 0 or notional <= 0:
+        return 0.0
+    try:
+        cap = float(cfg.get("impact_slip_cap", 0) or 0)
+    except (TypeError, ValueError):
+        cap = 0.0
+    if cap <= 0:
+        cap = 1.0
+    try:
+        liq = float(cfg.get("liquidity_ref", 0) or 0)
+    except (TypeError, ValueError):
+        liq = 0.0
+    turn = _day_turnover(db, cid, price)
+    if turn < liq:
+        # 开盘头几分钟成交额还没堆起来，用基准流动性兜底，
+        # 否则「半夜三点一笔大单」会算出荒唐的滑点。
+        turn = liq
+    if turn <= 0:
+        return 0.0
+    share = notional / turn
+    slip = max(0.0, min(cap, k * share))
+    if slip < 1e-4:
+        # 滑点低于 0.01% 就当没有 —— 不跟玩家计较这一分钱的零头，
+        # 也避免「浮点尘埃」把「现金刚好够」的单子顶掉。
+        return 0.0
+    return slip
+
+
+def _slip_to_pool(db, cfg, amount):
+    """冲击成本收入进全民分红池。tycoon 反过来 import market，
+    这里只能用函数内延迟 import，否则会循环引用。"""
+    if amount <= 0:
+        return
+    try:
+        import tycoon
+        tycoon.pool_add_capped(db, amount, cfg)
+    except Exception:
+        pass
+
+
+def _round_px(cfg, price):
+    """成交价对齐最小价位（价格精度）。
+
+    【为什么必须对齐】冲击成本算出来是个连续小数
+    （100 × (1 + 2.9e-9) = 100.000000286），不落到价位上就会出现
+    「差 0.00 元买不起」这种鬼故事 —— 玩家现金正好等于保证金 + 手续费，
+    却因为浮点尘埃被拒单。对齐之后，成交价永远是可以真实报出来的价格。
+    """
+    try:
+        p = int(cfg.get("price_precision", 4))
+    except (TypeError, ValueError):
+        p = 4
+    p = max(0, min(6, p))
+    return round(float(price), p)
+
+
 # ---------------------------------------------------------------- 站内通知
 NOTICE_KIND_LIQ = "liquidation"
 NOTICE_KIND_BANKRUPT = "bankrupt"
@@ -265,6 +355,54 @@ def place_order(db, cfg, qq, cid, side, qty, leverage, price=None):
         return False, "没有这只股票", None
     if side not in ("long", "short"):
         return False, "方向只能是多或空", None
+    # 【v4.14 封板禁开仓】涨跌停板上的票不许建仓。
+    #
+    # 【为什么必须封】涨跌停是「硬夹取」：价格被夹在 [昨收×0.9, 昨收×1.1] 里，
+    # 越界就截断。截断会系统性地把价格往带内拽 —— 于是贴板的票对大盘变成
+    # **单边绝缘**：跌停上的票「跌不下去」，涨停上的票「涨不动」。
+    #
+    # 现网实测（266 票 / 2 天 K 线 / 51.7 万个样本，已扣掉大盘方向，
+    # 统计「当前位置 -> 未来 30 分钟」的累计超额）：
+    #     band_pos -1.00（贴跌停）：**+1.06%**，胜率 **78.8%**
+    #     band_pos -0.90           ：**+0.57%**，胜率 66.8%
+    #     band_pos -0.80           ：+0.21%，胜率 57.2%（已经跟正常票没区别）
+    #     band_pos -0.50 ~ 0.00    ：+0.12% ~ +0.04%，胜率 ~50%（纯噪声）
+    # 贴涨停侧对称：band_pos +1.00 做空 30 分钟超额 -0.19%、胜率 43.0%。
+    # 20 倍杠杆下，「贴跌停抄底」每笔就是 +21% 保证金、胜率 78.8% ——
+    # 主群 Kaito 两天从 1300 万涨到 534.57 亿，232 笔平仓 221 笔盈利（95.3%），
+    # 赢/亏比 267000:1，就是这台印钞机。
+    #
+    # 【挡多宽】band_block_ratio = 0.1 = 距涨跌停边界 1% 以内（band_pos 的 |x| >= 0.9）。
+    # 再往外放：绝缘效应已经衰减到跟正常票没区别，不该误伤正常交易；
+    # 再往里收：-0.9 那一档 +0.57%/66.8% 的边就漏出去了。
+    # 平仓不受影响 —— 有仓位随时可以跑。
+    block_ratio = float(cfg.get("band_block_ratio", 0) or 0)
+    if block_ratio > 0:
+        try:
+            pc0 = float(comp["prev_close"] or 0)
+            px0 = float(comp["price"] or 0)
+            lim = float(cfg.get("price_limit", 0.1) or 0.1)
+        except (TypeError, ValueError):
+            pc0 = px0 = lim = 0.0
+        if pc0 > 0 and lim > 0:
+            block = pc0 * lim * block_ratio
+            hi_lim = pc0 * (1 + lim)
+            lo_lim = pc0 * (1 - lim)
+            nm = comp["name"]
+            chg = (px0 / pc0 - 1.0) * 100.0
+            if px0 >= hi_lim - block:
+                if side == "long":
+                    return False, ("「%s」已经顶到涨停附近了（涨 %.1f%%），排队都买不到 —— "
+                                   "涨停板上是别人的钱在接货，等开板再来，或者去别的票看看。"
+                                   % (nm, chg)), None
+                return False, ("「%s」已经顶到涨停附近了（涨 %.1f%%），涨停板上一堆人抢筹，"
+                               "现在做空是在最高点接刀 —— 等开板再来。" % (nm, chg)), None
+            if px0 <= lo_lim + block:
+                if side == "long":
+                    return False, ("「%s」已经砸到跌停附近了（跌 %.1f%%），跌停板上全是等着割肉的人 —— "
+                                   "现在抄底容易变成接飞刀，等开板再来。" % (nm, abs(chg))), None
+                return False, ("「%s」已经砸到跌停附近了（跌 %.1f%%），跌停板上是割肉盘在堆，"
+                               "现在做空是在最低点接刀 —— 等开板再来。" % (nm, abs(chg))), None
     try:
         qty = float(qty)
         leverage = int(leverage)
@@ -288,6 +426,16 @@ def place_order(db, cfg, qq, cid, side, qty, leverage, price=None):
 
     price = float(price) if price else float(comp["price"])
     cost = qty * price
+    # 【v4.14 冲击成本】单子太大 -> 成交价变差（买贵 / 卖便宜）。
+    # 多付（或少收）的那部分直接进全民分红池。
+    raw_cost = cost
+    slip = impact_slip(db, cfg, cid, cost, price)
+    if slip > 0:
+        price = _round_px(cfg, price * (1 + slip) if side == "long" else price * (1 - slip))
+        cost = qty * price
+    # 滑点金额先记着，**等所有校验都过了、真的成交了**再进池子 ——
+    # 否则「资金不足」「仓位太重」被拒的单子，池子照样收钱，等于凭空造钱。
+    slip_fee = abs(cost - raw_cost)
     margin = cost / leverage
     # 【v4.7】高档位手续费折扣（特权之一）
     disc = tiers.fee_discount(acct["equity"]) if acct else 0.0
@@ -343,15 +491,17 @@ def place_order(db, cfg, qq, cid, side, qty, leverage, price=None):
                                cur_notional, cost)), None
     fee = 0.0 if coupons.use(db, qq, "fee_free", 1) else fee_full
     db.ex("UPDATE users SET cash=cash-? WHERE qq=?", (margin + fee, qq))
+    _slip_to_pool(db, cfg, slip_fee)
     db.ex("INSERT INTO positions(qq,cid,side,qty,entry,leverage,margin,opened_at) VALUES(?,?,?,?,?,?,?,?)",
           (qq, cid, side, qty, price, leverage, margin, now()))
     db.ex("INSERT INTO trades(qq,cid,side,kind,qty,price,leverage,fee,pl,ts) VALUES(?,?,?,?,?,?,?,?,?,?)",
           (qq, cid, side, "open", qty, price, leverage, fee, 0.0, now()))
     _ledger(db, qq, -(margin + fee), "开仓 %s %s x%d" % ("买入" if side == "long" else "卖出",
                                                      comp["name"], leverage))
-    return True, "已开仓：%s %s %d 股 @%.2f（杠杆 %dx，占用保证金 %.2f）%s" % (
+    slip_note = ("，冲击成本 %.2f%%（单子太大，成交价变差）" % (slip * 100)) if slip > 0 else ""
+    return True, "已开仓：%s %s %d 股 @%.2f（杠杆 %dx，占用保证金 %.2f）%s%s" % (
         "买入" if side == "long" else "卖出", comp["name"], qty, price, leverage, margin,
-        reopen_note), {
+        reopen_note, slip_note), {
         "margin": round(margin, 2), "fee": round(fee, 2)}
 
 
@@ -372,6 +522,12 @@ def close_position(db, cfg, qq, pos_id, force=False, qty=None):
         qty = total
     part = qty / total if total else 1.0
     sign = 1 if p["side"] == "long" else -1
+    # 【v4.14 冲击成本】平仓同样按单子大小打折成交。
+    raw_price = price
+    slip = impact_slip(db, cfg, p["cid"], qty * price, price)
+    if slip > 0:
+        price = _round_px(cfg, price * (1 - slip) if sign > 0 else price * (1 + slip))
+        _slip_to_pool(db, cfg, abs(qty * (price - raw_price)))
     pl = (price - p["entry"]) * qty * sign
     # 强平手续费 2 倍（原来 3 倍）：被强平已经够肉痛了，
     # 再乘 3 会出现「借点钱炒股 → 平仓倒亏手续费」的体感。
@@ -418,8 +574,9 @@ def close_position(db, cfg, qq, pos_id, force=False, qty=None):
     tag = "强平" if force else "平仓"
     left = "" if qty >= total - 1e-9 else "（剩余 %.0f 股）" % (total - qty)
     tax_note = ("，其中短线交易费 x%.1f" % cd_mult) if cd_mult > 1.0 else ""
+    slip_note = ("，冲击成本 %.2f%%" % (slip * 100)) if slip > 0 else ""
     return True, "%s%s%s，盈亏 %.2f（含手续费 %.2f%s）" % (
-        tag, comp["name"], left, pl - fee, fee, tax_note), {
+        tag, comp["name"], left, pl - fee, fee, tax_note + slip_note), {
         "pl": round(pl - fee, 2)}
 
 

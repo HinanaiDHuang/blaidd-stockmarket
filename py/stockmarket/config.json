@@ -147,5 +147,14 @@
   "fund_bet_daily_limit": 1,
   "dividend_pool_rate": 0.05,
   "whale_notional_min_equity": 50000000,
-  "whale_notional_ratio": 20
+  "whale_notional_ratio": 20,
+  "band_reflect": 1,
+  "band_anchor_sync": 0,
+  "impact_slip_k": 0.008,
+  "impact_slip_cap": 0.06,
+  "liquidity_ref": 400000000000,
+  "dividend_pool_ref": 500000,
+  "dividend_pool_boost_max": 6,
+  "dividend_pool_cap": 3000000,
+  "band_block_ratio": 0.1
 }

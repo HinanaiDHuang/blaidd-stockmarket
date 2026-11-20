@@ -341,10 +341,10 @@ def _settle_day(db, cfg, day):
     # 管理费 + 盈利分成 -> 全民分红池（这是「富豪的钱流到穷人」的主干道）
     pool_in = to_pool + fee
     if pool_in > 0:
-        tycoon.pool_add(db, pool_in)
+        tycoon.pool_add_capped(db, pool_in, cfg)
     # 押错的人本金直接进更穷的人手里
     if loser_total > 0:
-        tycoon.pool_add(db, loser_total)
+        tycoon.pool_add_capped(db, loser_total, cfg)
 
     lines = []
     dir_txt = "涨" if r > 0 else ("跌" if r < 0 else "平")

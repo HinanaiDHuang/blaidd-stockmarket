@@ -180,9 +180,11 @@ check("T8.3 钱确实扣了", abs((before - cash_of("2001")) - info["cost"]) < 0
 okk, msg, _ = features.company_sabotage(db, cfg, "4001", 2, "资本碾压")
 check("T8.4 小户玩不起", (not okk) and "身家" in msg, msg)
 # 自己有仓位的票不能砸
-okk, msg, _ = market.place_order(db, cfg, "2001", 2, "long", 10, 1)
+mk_company("9003", "自己的产业", "自留地", "SELF", 30.0)
+own = db.q1("SELECT id FROM companies WHERE ticker='SELF'")["id"]
+okk, msg, _ = market.place_order(db, cfg, "2001", own, "long", 10, 1)
 check("T8.5 有仓位能开仓", okk, msg)
-okk, msg, _ = features.company_sabotage(db, cfg, "2001", 2, "资本碾压")
+okk, msg, _ = features.company_sabotage(db, cfg, "2001", own, "资本碾压")
 check("T8.6 有仓位不能砸自己的票", (not okk) and "仓位" in msg, msg)
 
 # ============================================================ T9 散财榜

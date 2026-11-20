@@ -87,6 +87,30 @@ def now():
     return int(time.time())
 
 
+def reflect_into_band(price, lo_lim, hi_lim, on=True):
+    """把价格反射回涨跌停带内。
+
+    【反射 vs 截断】截断（clamp）是「越界多少就砍掉多少」，
+    系统性地把价格往带内拽 —— 于是跌停价上的股票「跌不下去」，
+    条件期望天然为正。现网实锤：主群 Kaito 两天从 1300 万涨到 534.57 亿，
+    232 笔平仓 221 笔盈利（95.3%），赢/亏比 267000:1。
+    根因就在这个截断上：贴跌停的票遇大盘利空只跌 0.0056%（一点不跌），
+    遇大盘利好照涨 1.76% —— 「贴跌停抄底」等于一张免费的大盘看跌期权。
+
+    反射是「越界多少就往回弹多少」：越界的概率质量被等量推回带内，
+    鞅性保住，边界处不再有单向漂移。
+
+    on=False 时退回截断（老行为，留着做回退开关）。
+    """
+    if not on:
+        return min(max(price, lo_lim), hi_lim)
+    if price > hi_lim:
+        return hi_lim - (price - hi_lim)
+    if price < lo_lim:
+        return lo_lim + (lo_lim - price)
+    return price
+
+
 class Engine:
     """单个群的行情引擎。"""
 
@@ -354,10 +378,30 @@ class Engine:
             # 夹取永远生效。带边界不取整、价取整到分，
             # 顶到边界上时会出现 1 分钱的溢出，老逻辑会把整段夹取跳过，
             # 股价从涨停位再跑 3.5%/tick，这是之前日波动 20%+ 的真正原因。
-            banded = min(max(new_price, lo_lim), hi_lim)
+            # 【v4.14 反射代替截断】
+            # 原来越界就「截断」到边界（clamp）。截断会系统性地把价格往带内拽：
+            # 跌停价上的股票「跌不下去」，条件期望天然为正 —— 这台印钞机现网已经实测：
+            #   首次触及跌停后 30 分钟：均值 +3.19%，胜率 97.4%
+            #   首次触及涨停后 30 分钟：均值 +0.82%，胜率 62.9%
+            # 「贴跌停抄底」是确定性赚钱：20 倍杠杆下每笔 +60% 本金。
+            # 现网实锤（2026-11-19~20，主群）：Kaito 两天从 1300 万涨到 534.57 亿，
+            # 232 笔平仓 221 笔盈利（95.3%），赢亏比 267000:1。
+            # 改成「反射」：越界多少就往回弹多少，价格在带内来回震荡，
+            # 鞅性保住，边界处不再有单向漂移。
+            reflect = bool(self._num("band_reflect", 1))
+            banded = min(max(reflect_into_band(new_price, lo_lim, hi_lim, reflect),
+                              lo_lim), hi_lim)
             if diag_on:
                 _ENGINE_ACC["band"] += (banded - new_price) / max(1e-9, r["price"])
             new_price = round(banded, self._prec())
+            # 【v4.14 触板锚点同步】
+            # 价格贴在涨跌停上时，把该票的锚点拉到现价：均值回归的拉力
+            # （pull = rev x (anchor - price)）随之归零，股价不会「自己从跌停弹回来」。
+            # 这条和上面的反射一起，把「贴板反向」从稳赚变成真正的赌博。
+            if self._num("band_anchor_sync", 0):
+                if (banded <= lo_lim + eps or banded >= hi_lim - eps):
+                    if abs(float(r["anchor"] or banded) - banded) > 1e-9:
+                        self.db.ex("UPDATE companies SET anchor=? WHERE id=?", (banded, r["id"]))
             hi = max(r["price"], new_price)
             lo = min(r["price"], new_price)
             vol = random.uniform(1e4, 6e5)

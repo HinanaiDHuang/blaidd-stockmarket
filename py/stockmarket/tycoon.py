@@ -34,6 +34,7 @@ import tiers
 from db import now
 
 POOL_KEY = "dividend_pool"        # meta: 全民分红池余额
+POOL_OVER_KEY = "dividend_pool_overflow"   # meta: 超出池子上限被沉淀掉的累计金额
 FEE_DAY_KEY = "tycoon_fee_day"    # meta: 上次收会员费的日期（幂等）
 ROB_MARK = "打土豪"                # ledger 原因前缀
 LUX_MARK = "挥霍消费"              # ledger 原因前缀
@@ -118,6 +119,78 @@ def pool_set(db, value):
 
 def pool_add(db, amount):
     pool_set(db, pool_get(db) + float(amount))
+
+
+def pool_cap(cfg=None):
+    """分红池余额上限。0 = 不限。"""
+    try:
+        return max(0.0, float((cfg or {}).get("dividend_pool_cap", 0) or 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def pool_overflow(db):
+    """累计沉淀金额：池子满了以后，没进池的那部分。"""
+    try:
+        return float(db.get_meta(POOL_OVER_KEY, "0") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def pool_add_capped(db, amount, cfg=None):
+    """往池子里加钱，但不超过池子上限。
+
+    【为什么要封顶】
+    池子的钱全是「会员费 + 富豪挥霍抽成」进来的。富豪一天挥霍几十万，
+    80% 进池子 —— 而分红一天只发得出几百块。不封顶的话池子就是个黑洞：
+    只进不出，富豪的钱进去了，普通玩家一点都拿不到（现网池子趴着 74 万，
+    一天实际只发出 486 元）。
+    封顶之后：池子满到 dividend_pool_cap 就不再多收，超出的部分记成
+    「沉淀」（网页上能看到），富豪照样把钱花掉了（这本来就是给富人
+    准备的花钱出口），但池子不会变成无底洞。
+
+    返回真正进池的金额。
+    """
+    try:
+        amount = float(amount or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if amount <= 0:
+        return 0.0
+    cap = pool_cap(cfg)
+    cur = pool_get(db)
+    room = amount
+    if cap > 0:
+        room = max(0.0, min(amount, cap - cur))
+        if room < amount - 1e-9:
+            db.set_meta(POOL_OVER_KEY, round(pool_overflow(db) + (amount - room), 2))
+    pool_set(db, cur + room)
+    return round(room, 2)
+
+
+def dividend_pool_boost(cfg, pool):
+    """分红池挂钩系数：池子越大，每个人分到越多（带封顶）。
+
+    · ref = 0 → 不挂钩（保持老行为，老库和测试安全）
+    · 系数最低 1.0：池子小的时候不让人比原来拿得更少
+    · boost_max 是封顶倍数，防止富豪堆池子时给所有人发平钱
+    """
+    try:
+        ref = float(cfg.get("dividend_pool_ref", 0) or 0)
+    except (TypeError, ValueError):
+        ref = 0.0
+    if ref <= 0:
+        return 1.0
+    try:
+        cap = float(cfg.get("dividend_pool_boost_max", 1) or 1)
+    except (TypeError, ValueError):
+        cap = 1.0
+    cap = max(1.0, cap)
+    try:
+        pool = float(pool or 0)
+    except (TypeError, ValueError):
+        pool = 0.0
+    return max(1.0, min(cap, pool / ref))
 
 
 def _heat_of(db, qq):
@@ -239,7 +312,7 @@ def collect_fees(db, cfg):
             continue
         db.ex("UPDATE users SET cash=cash-? WHERE qq=?", (fee, qq))
         _ledger(db, qq, -fee, "会员费")
-        pool_add(db, fee)
+        pool_add_capped(db, fee, cfg)
         total += fee
         count += 1
     return count, round(total, 2)
@@ -299,7 +372,7 @@ def collect_margin_tax(db, cfg):
             continue
         db.ex("UPDATE users SET cash=cash-? WHERE qq=?", (tax, qq))
         _ledger(db, qq, -tax, "持仓税")
-        pool_add(db, tax)
+        pool_add_capped(db, tax, cfg)
         total += tax
         count += 1
     return count, round(total, 2)
@@ -313,7 +386,8 @@ def settle_day(db, cfg):
     seed = float(cfg.get("dividend_pool_seed", 8000))
     if db.get_meta("dividend_pool_seeded", "") != "1":
         db.set_meta("dividend_pool_seeded", "1")
-        pool_set(db, max(pool_get(db), seed))
+        cap = pool_cap(cfg)
+        pool_set(db, min(max(pool_get(db), seed), cap) if cap > 0 else max(pool_get(db), seed))
     return count, total, mcount, mtotal
 
 # ================================================================ 打土豪
@@ -665,20 +739,25 @@ def luxury_buy(db, cfg, qq, key):
     to_pool = round(price * pool_ratio, 2)
     burned = round(price - to_pool, 2)
     if to_pool > 0:
-        pool_add(db, to_pool)
+        put = pool_add_capped(db, to_pool, cfg)
+    else:
+        put = 0.0
+    # 池子满了以后超出部分记为「沉淀」，文案要说清楚，别让人以为钱凭空没了
+    spilled = round(to_pool - put, 2)
     _add_rep(db, qq, float(item["rep"]))
     rep = _rep(db, qq)
     protect = min(0.30, rep * 0.015)
     msg = ("%s %s到手！（%s档）\n· 花了 %s 元（净值的 %.1f%%）\n"
            "· 声望 +%d → %.1f（被打劫成功率 -%.1f%%，每天掉 5%% 点）\n"
-           "· %s 元进全民分红池，%s 元直接销毁（防通胀）" % (
+           "· %s 元进全民分红池，%s 元直接销毁（防通胀）%s" % (
                item["emoji"], item["name"], item.get("tier") or "", _yuan(price),
                (price / eq * 100) if eq > 0 else 0.0,
-               item["rep"], rep, protect * 100, _yuan(to_pool), _yuan(burned)))
+               item["rep"], rep, protect * 100, _yuan(put), _yuan(burned),
+               ("，另有 %s 元沉淀（分红池已满）" % _yuan(spilled)) if spilled > 0 else ""))
     msg += "\n· " + item["desc"]
     return True, msg, {"item": item["name"], "price": price, "rep": rep,
                        "tier": item.get("tier") or "",
-                       "pool": to_pool, "burned": burned}
+                        "pool": put, "burned": burned, "spilled": spilled}
 
 # ================================================================ 全民分红池
 def _active_today(db, qq):
@@ -703,18 +782,23 @@ def _streak_days(db, qq, days=7):
     return len(buckets)
 
 
-def dividend_amount(cfg, equity, streak):
+def dividend_amount(cfg, equity, streak, pool=None):
     """分红额 = 底薪 × 贫困系数 × 连续活跃系数。
 
     贫困系数：净值越低拿越多（0 净值拿 3 倍，初始本金拿 1 倍，
     高于初始本金的不再加分，最低 0.3 倍）。
+
+    【v4.14 池子挂钩】pool 不为 None 时再乘一个「池子挂钩系数」：
+    池子越大，每个人分到的越多（见 dividend_pool_boost）。
+    pool 传 None 表示不挂钩（老调用方保持原样）。
     """
     base = float(cfg.get("dividend_base", 30))
     init = float(cfg.get("initial_cash", 100000) or 100000)
     poor = 3.0 - 2.0 * max(0.0, equity) / max(1.0, init)
     poor = max(0.3, min(3.0, poor))
     sf = min(2.0, 1.0 + 0.12 * max(0, int(streak) - 1))
-    amt = base * poor * sf
+    boost = dividend_pool_boost(cfg, pool) if pool is not None else 1.0
+    amt = base * poor * sf * boost
     return round(max(float(cfg.get("dividend_min", 10)), amt), 2)
 
 
@@ -725,10 +809,16 @@ def dividend_status(db, cfg, qq):
         return None
     eq = _equity(db, cfg, qq)
     streak = _streak_days(db, qq)
+    pool = pool_get(db)
     return {"qq": qq, "equity": round(eq, 2), "streak": streak,
             "active": _active_today(db, qq), "claimed": _claimed_today(db, qq),
-            "amount": dividend_amount(cfg, eq, streak),
-            "pool": round(pool_get(db), 2)}
+            "amount": dividend_amount(cfg, eq, streak, pool),
+            "pool": round(pool, 2),
+            "boost": round(dividend_pool_boost(cfg, pool), 3),
+            "boost_max": round(dividend_pool_boost(cfg, float(cfg.get("dividend_pool_ref", 0) or 0)
+                                                    * float(cfg.get("dividend_pool_boost_max", 1) or 1)), 3),
+            "pool_cap": round(pool_cap(cfg), 2),
+            "pool_overflow": round(pool_overflow(db), 2)}
 
 
 def claim_dividend(db, cfg, qq):
@@ -756,7 +846,7 @@ def claim_dividend(db, cfg, qq):
     room = max(0.0, cap - used)
     if room < 1:
         return False, "今天的分红已经发满了（上限 %.0f），明天再来" % cap, None
-    amt = dividend_amount(cfg, _equity(db, cfg, qq), _streak_days(db, qq))
+    amt = dividend_amount(cfg, _equity(db, cfg, qq), _streak_days(db, qq), pool)
     if pool < amt:
         # 池子见底：交易所按「印钞上限」垫一笔（不是无限印）
         print_cap = float(cfg.get("dividend_print_cap", 20000))
@@ -776,9 +866,9 @@ def claim_dividend(db, cfg, qq):
     st = dividend_status(db, cfg, qq)
     msg = ("🪙 全民分红到账 %.2f 元！\n"
            "· 你最近 %d 天活跃，贫困系数拉满\n"
-           "· 池子还剩 %.0f 元，明天会员费到账后会再涨\n"
+           "· 池子还剩 %.0f 元（挂钩 ×%.2f，封顶 ×%.0f）\n"
            "· 天天来冒泡，分红一天比一天多" % (
-               amt, st["streak"], max(0.0, pool_get(db))))
+               amt, st["streak"], max(0.0, pool_get(db)), st["boost"], st["boost_max"]))
     return True, msg, {"amount": amt, "pool": round(pool_get(db), 2)}
 
 # ================================================================ 榜单 / 体检
