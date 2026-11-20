@@ -132,6 +132,7 @@
     orders: [], coupons: [], vote: null, voteBoard: [], lottery: null, guess: null,
     recovery: null, tier: null, job: null, onboarding: null, quests: [], rise: [],
     rob: null, luxury: null, dividend: null, wealth: null,
+    fund: null, fundBet: null, fundBoard: [], fundBets: [],
     openPanel: null, loaded: {}, msg: {}, changelog: null,
     groups: [], switching: false
   };
@@ -1528,7 +1529,7 @@
     "<p><b>\u80a1\u7968</b>\u3001<b>\u7b7e\u5230</b>\u3001<b>\u62bd\u5956</b>\u3001<b>\u6295\u7968 \u80a1\u7968\u540d</b>\u3001<b>\u6da8\u505c\u7ade\u731c \u80a1\u7968\u540d</b>\u3001<b>\u6211\u7684\u6761\u4ef6\u5355</b>\u3001",
     "<b>\u6b62\u635f \u80a1\u7968\u540d \u4ef7\u683c</b>\u3001<b>\u6b62\u76c8 \u80a1\u7968\u540d \u4ef7\u683c</b>\u3001<b>\u9650\u4ef7 \u80a1\u7968\u540d \u4e70/\u5356 \u4ef7\u683c \u6570\u91cf</b>\u3001",
     "<b>\u5bcc\u8c6a\u699c</b>\u3001<b>\u6da8\u505c\u699c</b>\u3001<b>\u4eca\u65e5\u590d\u76d8</b>\u3001<b>\u5feb\u8baf</b>\u3001",
-    "<b>\u6211\u7684\u6863\u4f4d</b>\u3001<b>\u6253\u571f\u8c6a \u6635\u79f0</b>\u3001<b>\u6325\u970d \u5bcc\u8fdb</b>\u3001<b>\u9886\u5206\u7ea2</b>\u3001<b>\u8d22\u5bcc\u5206\u5e03</b>\u3002</p>"
+    "<b>\u6211\u7684\u6863\u4f4d</b>\u3001<b>\u6253\u571f\u8c6a \u6635\u79f0</b>\u3001<b>\u6325\u970d \u5bcc\u8fdb</b>\u3001<b>\u9886\u5206\u7ea2</b>\u3001<b>\u8d22\u5bcc\u5206\u5e03</b>\u3001<b>\u8d22\u9600\u57fa\u91d1\uff08\u62bc\u6da8\u62bc\u8dcc\uff09</b>\u3002</p>"
   ].join("");
 
   function showHelp(on) {
@@ -1619,7 +1620,8 @@
       { n: "\u4eba\u6c14\u6295\u7968", i: "\ud83d\uddf3", p: "vote" },
       { n: "\u6da8\u505c\u7ade\u731c", i: "\ud83c\udfaf", p: "guess" },
       { n: "\u6253\u571f\u8c6a", i: "\ud83e\uddb9", p: "rob" },
-      { n: "\u6325\u970d\u6d88\u8d39", i: "\ud83d\uded5", p: "lux" }
+      { n: "\u6325\u970d\u6d88\u8d39", i: "\ud83d\uded5", p: "lux" },
+      { n: "\u8d22\u9600\u57fa\u91d1", i: "\ud83c\udfdb", p: "fund" }
     ]},
     { g: "\u6211\u7684\u8d44\u4ea7", items: [
       { n: "\u6211\u7684\u516c\u53f8", i: "\ud83c\udfe2", p: "myco" },
@@ -1689,6 +1691,7 @@
     else if (pid === "lux") loadLux();
     else if (pid === "dividend") loadDividend();
     else if (pid === "wealth") loadWealth();
+    else if (pid === "fund") loadFund();
   }
 
   /* ---------------------------------------------------------- 富豪经济 */
@@ -1726,6 +1729,96 @@
       var box = $("wealthBox");
       if (box) box.innerHTML = `<div class="empty">${esc(e.message || "\u52a0\u8f7d\u5931\u8d25")}</div>`;
     });
+  }
+
+  /* ---------------------------------------------------------- 财阀基金（v4.13）
+     富豪的钱往哪儿去：富豪按净值比例自动出资、3 倍杠杆押全市场，
+     群友可以押方向。网页这边跟群里是同一套后端。 */
+  function loadFund() {
+    get("/api/fund").then(function (d) {
+      S.fund = d.st;
+      S.fundBet = d.bet;
+      S.fundBoard = d.board || [];
+      S.fundBets = d.bets || [];
+      renderFund();
+    }).catch(function (e) {
+      var box = $("fundBox");
+      if (box) box.innerHTML = `<div class="empty">${esc(e.message || "\u52a0\u8f7d\u5931\u8d25")}</div>`;
+    });
+  }
+
+  function renderFund() {
+    var box = $("fundBox");
+    if (!box) return;
+    var st = S.fund;
+    if (!st) { box.innerHTML = `<div class="empty">\u52a0\u8f7d\u4e2d\u2026</div>`; return; }
+    var bt = S.fundBet || {};
+    var h = "";
+    if (S.msg.fund) h += `<div class="ty-msg">${esc(S.msg.fund).replace(/\n/g, "<br>")}</div>`;
+    h += `<div class="ty-line">\u4f60\u7684\u51c0\u503c <b>${fmtInt(st.equity)}</b> \u5143</div>`;
+    h += `<div class="ty-line">\u5168\u6c11\u5206\u7ea2\u6c60 <b>${fmtInt(st.pool)}</b> \u5143`
+       + `\uff08\u6628\u5929\u5168\u5e02\u573a\u7b49\u6743 `
+       + `<b>${st.today_return >= 0 ? "+" : ""}${st.today_return}%</b>\uff09</div>`;
+    if (st.equity >= st.min_equity) {
+      h += `<div class="ty-line job-tip">\u4f60\u662f\u8d22\u9600\uff1a\u6bcf\u5929\u81ea\u52a8\u628a\u51c0\u503c\u7684 `
+         + `${(st.ratio * 100).toFixed(0)}%\uff08\u6700\u591a ${fmtInt(st.max)} \u5143\uff09\u62bc\u8fdb\u57fa\u91d1`
+         + `\uff0c\u4eca\u5929\u5df2\u6295 ${fmtInt(st.stake_today)} \u5143\u3002</div>`;
+    } else {
+      h += `<div class="ty-line">\u51c0\u503c\u8fbe <b>${fmtInt(st.min_equity)}</b> \u5143\u624d\u80fd\u7b79\u8d44`
+         + `\u5efa\u57fa\u91d1\uff08\u73b0\u5728 ${fmtInt(st.equity)} \u5143\uff09\u3002</div>`;
+    }
+    h += `<div class="fun-hint">\u57fa\u91d1 ${st.lev} \u500d\u6760\u6746\u62bc\u300c\u5168\u5e02\u573a\u7b49\u6743`
+       + `\u6da8\u8dcc\u300d\uff1a\u6da8\u4e86\u5206\u3001\u8dcc\u4e86\u51fa\u8d44\u4eba\u81ea\u5df1\u62b5\u3002`
+       + `\u7ba1\u7406\u8d39 ${(st.fee * 100).toFixed(0)}% \u76f4\u63a5\u8fdb\u5168\u6c11\u5206\u7ea2\u6c60\u3002</div>`;
+
+    /* 押注区：押对了拿回本金还分盈利，押错了本金进分红池 */
+    h += `<div class="ty-sub">\u62fc\u4e00\u624b</div>`;
+    if (bt.side) {
+      h += `<div class="ty-line">\u4eca\u5929\u5df2\u62fc <b>${esc(bt.side)}</b> `
+         + `${fmtInt(bt.amount)} \u5143\uff0c\u660e\u5929\u7ed3\u7b97\u3002</div>`;
+    } else {
+      h += `<div class="vote-add">`
+         + `<button class="mini-btn primary" type="button" data-fund="up">\u62fc\u6da8</button>`
+         + `<button class="mini-btn danger" type="button" data-fund="down">\u62fc\u8dcc</button>`
+         + `<span class="r-sub">\u6700\u591a ${fmtInt(bt.max || 0)} \u5143/\u6b21\uff0c\u4eca\u5929 ${bt.left || 0} \u6b21</span>`
+         + `</div>`;
+      h += `<div class="fun-hint">\u4f60\u62fc\u7684\u662f\u5bcc\u7684\u4ed3\u4f4d\uff1a\u62fc\u5bf9\u4e86\u62ff\u56de\u672c\u91d1`
+         + `\u8fd8\u5206\u57fa\u91d1\u76c8\u5229\uff0c\u62fc\u9519\u4e86\u672c\u91d1\u76f4\u63a5\u8fdb\u5168\u6c11\u5206\u7ea2\u6c60\u3002</div>`;
+    }
+
+    if (S.fundBoard && S.fundBoard.length) {
+      h += `<div class="ty-sub">\u4eca\u65e5\u51fa\u8d44\u699c</div>`;
+      for (var i = 0; i < S.fundBoard.length; i++) {
+        var b = S.fundBoard[i];
+        h += `<div class="ty-target"><span class="ty-name">${b.rank}. ${esc(b.nick)}`
+           + `<span class="r-sub">\u4eca\u5929\u6295\u7d2f ${fmtInt(b.amount)} \u5143</span></span>`
+           + `<span class="ty-eq">${fmtInt(b.amount)}</span></div>`;
+      }
+    }
+    if (S.fundBets && S.fundBets.length) {
+      h += `<div class="ty-sub">\u62fc\u6ce8\u699c</div>`;
+      for (var j = 0; j < S.fundBets.length; j++) {
+        var bb = S.fundBets[j];
+        h += `<div class="ty-target"><span class="ty-name">${bb.rank}. ${esc(bb.nick)}`
+           + `<span class="r-sub">\u62fc\u4e86\u300c${esc(bb.side)}\u300d</span></span>`
+           + `<span class="ty-eq">${fmtInt(bb.amount)}</span></div>`;
+      }
+    }
+    box.innerHTML = h;
+    var bs = box.querySelectorAll("[data-fund]");
+    for (var k = 0; k < bs.length; k++) {
+      bs[k].addEventListener("click", function () {
+        betFund(this.getAttribute("data-fund") === "up" ? "\u6da8" : "\u8dcc");
+      });
+    }
+  }
+
+  function betFund(side) {
+    post("/api/fund", { side: side }).then(function (d) {
+      S.msg.fund = d.msg || "";
+      toast(d.msg || "\u5df2\u62fc\u6ce8");
+      return loadFund();
+    }).catch(function (e) { toast(e.message); });
   }
 
   function doRob(target) {

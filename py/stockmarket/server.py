@@ -129,6 +129,7 @@ CHANGELOG = [
             "新增持仓税：净值 500 万以上、仓位里的钱每天按保证金 0.1% 交税 —— 钱锁在仓位里复利也要交税",
             "分红池改成按余额比例发放：池子里趴着多少钱，每天就按比例发多少（原来上限写死 8000，池子再大也发不出去）",
             "大户仓位上限：净值 5000 万以上的账户，总名义仓位不超过「自有净资产」（净值 − 保证金）的 20 倍（原来能开到净值的 60~90 倍）",
+            "网页「我的」页新增「财阀基金」面板：群友可以直接押涨/押跌，还能看今日出资榜和押注榜",
         ],
     },
     {
@@ -1972,6 +1973,42 @@ def api_g_fund():
     if not okk:
         return fail(msg)
     return ok({"msg": msg, "info": info, "g": gid}, msg)
+
+
+@app.route("/api/fund", methods=["GET", "POST"])
+def api_fund():
+    """财阀基金（网页端）。
+
+    群里那版走 /api/g/fund —— Dice! 插件在本机，用 admin key。
+    网页这边走令牌（X-Token），跟 /api/vote 一个套路。
+    """
+    if request.method == "GET":
+        handle, uid, err = get_ctx(request.args.get("g"), request.args.get("u"),
+                                   request.args.get("t"))
+        if err:
+            return err
+        st = whale.fund_status(handle, CFG, uid)
+        if st is None:
+            return fail("你还没有账户，先在群里发一次「炒股」")
+        return ok({"st": st, "bet": whale.bet_status(handle, CFG, uid),
+                   "text": whale.fund_text(handle, CFG, uid),
+                   "board": whale.fund_board(handle, CFG, 10),
+                   "bets": whale.bet_board(handle, CFG, 10)})
+    j = request.get_json(silent=True) or {}
+    handle, uid, err = get_ctx(j.get("g"), j.get("u"), j.get("t"))
+    if err:
+        return err
+    side = str(j.get("side", "") or "").strip()
+    if not side:
+        return fail("用法：押基金 涨 / 押基金 跌")
+    okk, msg, info = whale.bet_fund(handle, CFG, uid, side)
+    if not okk:
+        return fail(msg)
+    return ok({"msg": msg, "info": info,
+               "st": whale.fund_status(handle, CFG, uid),
+               "bet": whale.bet_status(handle, CFG, uid),
+               "board": whale.fund_board(handle, CFG, 10),
+               "bets": whale.bet_board(handle, CFG, 10)}, msg)
 
 
 @app.route("/api/g/rob", methods=["GET", "POST"])
