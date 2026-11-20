@@ -39,11 +39,20 @@ class OneBot:
         self.pending = {}
         self.seq = 0
         self.last_error = ""
+        # 【v4.17】连接成功回调列表：调用方可以在这里挂「连上了就干点什么」
+        # （炒股那边用它做「重连后立刻补刷群名」—— 以前只能等 30 分钟的定时刷新）。
+        self.on_connect = []
 
     # ---------------- 连接 ----------------
     def _on_open(self, ws):
         self.ready.set()
         print("[stockmarket] pusher connected -> %s" % self.url, flush=True)
+        # 【v4.17】通知调用方：通道通了（首次连接或掉线重连都算）
+        for cb in list(self.on_connect):
+            try:
+                cb()
+            except Exception as exc:
+                print("[stockmarket] pusher on_connect callback error:", exc, flush=True)
 
     def _on_error(self, ws, err):
         self.last_error = str(err)

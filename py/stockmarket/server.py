@@ -118,6 +118,17 @@ TOKEN_TTL = 60 * 60 * 24 * int(CFG.get("token_ttl_days", 7))
 # 主人明说不要在群里发公告，那就把变更说清楚放网页上。
 CHANGELOG = [
     {
+        "ver": "v4.17",
+        "date": "2026-11-20",
+        "title": "推送通道一重连就补刷群名：不用再等 30 分钟",
+        "items": [
+            "今天 QQ 掉线重连后，网页「换群」下拉里的群名一直空着，日志里只有一行「group names refreshed: 0/8」—— 根因是服务在推送通道断着的时候启动的，启动那轮刷新硬等 20 秒就放弃了；通道后来连上，却没人再刷，得等下一次 30 分钟的定时刷新才对得上",
+            "现在推送通道每次连上（首次连接、掉线重连都算）都会立刻补刷一次群名，最长 2 秒内生效，网页不用清缓存也不用刷新",
+            "拉群名失败（超时、通道抖动）的群不再静默跳过：单次超时 4 秒放宽到 8 秒、失败重试一次，还是不行就丢回待办队列，由后台 2 秒一轮的即时补拉继续试",
+            "通道没连上时日志不再打误导性的「0/8」，改成「skipped: 推送通道未连接」，一眼能分清是没连上还是拉失败",
+        ],
+    },
+    {
         "ver": "v4.16",
         "date": "2026-11-20",
         "title": "服务换成 waitress + 端口独占：野进程抢不走线上流量了",
@@ -631,18 +642,38 @@ def _queue_group_name(gid):
         _gname_pending.add(gid)
 
 
-def _fetch_group_names(gids):
-    """真去 OneBot 拉群名写缓存，返回成功个数。"""
+def _fetch_group_names(gids, retries=1):
+    """真去 OneBot 拉群名写缓存，返回成功个数。
+
+    【v4.17 改了三处】
+    ① 单次超时 4s → 8s：刚重连上那会儿 OneBot 要先把群列表拉起来，第一下容易慢；
+    ② 失败会**重试一次**（原来一次不过就当这个群没名字了）；
+    ③ 还是拿不到就把这个群**丢回待办队列**（_queue_group_name），
+       由后台 2 秒一轮的即时补拉再试 —— 原来失败既不重试也不排队，
+       群名就一直空着，只能等下一次 30 分钟的全量刷新。
+    """
     got = 0
     for gid in gids:
+        if not gid.isdigit():
+            continue
+        name = ""
+        for attempt in range(retries + 1):
+            if not PUSHER.connected:
+                break
+            try:
+                resp = PUSHER.bot.call("get_group_info", {"group_id": int(gid)}, timeout=8)
+                data = (resp or {}).get("data") or {}
+                name = str(data.get("group_name") or "").strip()
+            except Exception:
+                name = ""
+            if name:
+                break
+            if attempt < retries:
+                time.sleep(0.6)
+        if not name:
+            _queue_group_name(gid)
+            continue
         try:
-            if not gid.isdigit() or not PUSHER.connected:
-                continue
-            resp = PUSHER.bot.call("get_group_info", {"group_id": int(gid)}, timeout=4)
-            data = (resp or {}).get("data") or {}
-            name = str(data.get("group_name") or "").strip()
-            if not name:
-                continue
             dbmod.get_registry(DATA_DIR).set_meta(
                 "gname_%s" % gid, "%d|%s" % (int(time.time()), name))
             got += 1
@@ -677,22 +708,31 @@ def _group_name(gid):
     return ""
 
 
-def _refresh_group_names():
+def _refresh_group_names(reason="定时"):
     """后台把群名全量拉一遍（OneBot 的 get_group_info），写进登记表缓存。
 
     群名会变（改名、退群），所以每半小时刷一次；拉失败就保留旧名，
     实在没有就显示群号 —— 群名只是好看，功能不靠它。
+
+    【v4.17】推送通道**没连上**时直接跳过并说明原因。
+    原来是「硬等 20 秒，然后照样打一行 group names refreshed: 0/8」——
+    那行 0/8 看着像「8 个群全拉失败了」，其实只是通道当时没通；
+    现在通道一连上会由 _group_name_reconnect_watch 立刻补刷一次，
+    不用再等 30 分钟，网页「换群」下拉里的群名两秒内就出来了。
     """
+    global _last_gname_refresh
     gids = dbmod.known_groups(DATA_DIR)
     if not gids:
-        return
-    # 服务刚起来时推送通道还在握手，等它连上再问
-    for _ in range(20):
-        if PUSHER.connected:
-            break
-        time.sleep(1)
+        return 0
+    _last_gname_refresh = time.time()
+    if not PUSHER.connected:
+        print("[stockmarket] group names refresh skipped(%s): 推送通道未连接" % reason,
+              flush=True)
+        return 0
     got = _fetch_group_names(gids)
-    print("[stockmarket] group names refreshed: %d/%d" % (got, len(gids)), flush=True)
+    print("[stockmarket] group names refreshed: %d/%d (%s)" % (got, len(gids), reason),
+          flush=True)
+    return got
 
 
 def _group_name_worker():
@@ -718,10 +758,43 @@ def _group_name_worker():
 def _group_name_loop():
     while True:
         try:
-            _refresh_group_names()
+            _refresh_group_names("定时")
         except Exception as exc:
             print("[stockmarket] group name refresh error:", exc, flush=True)
         time.sleep(1800)
+
+
+# ---------------------------------------------------------------- v4.17 重连补刷
+# 【这是 2026-11-20 那次「群名刷新 0/8」的根因修复】
+# 那天 QQ 掉线重连：服务是在推送通道**断着**的时候启动的，
+# 于是启动那轮刷新硬等 20 秒就放弃了（只留下一行 0/8）；
+# 通道 15:43 恢复以后没人再刷，网页「换群」下拉里的群名就一直空着，
+# 要等下一次 30 分钟的定时刷新才对得上。
+# 现在改成：推送通道每次连上（首次连接 / 掉线重连）都立刻补刷一次。
+_pusher_reconnect = threading.Event()
+_last_gname_refresh = 0.0      # 定时刷新用（不影响重连补刷）
+_last_connect_refresh = 0.0     # 重连补刷专用防抖：60 秒内不重复刷
+
+
+def _on_pusher_connect():
+    """推送通道刚连上：记一笔，等后台线程去补刷群名。"""
+    _pusher_reconnect.set()
+
+
+def _group_name_reconnect_watch():
+    """推送通道一连上就补刷群名，不用等 30 分钟。"""
+    global _last_connect_refresh
+    while True:
+        _pusher_reconnect.wait()
+        _pusher_reconnect.clear()
+        time.sleep(2.0)   # 等 OneBot 那边把群列表拉起来再问
+        if time.time() - _last_connect_refresh < 60:
+            continue     # 刚刷过，别重复
+        _last_connect_refresh = time.time()
+        try:
+            _refresh_group_names("重连后补刷")
+        except Exception as exc:
+            print("[stockmarket] group name reconnect refresh error:", exc, flush=True)
 
 def _user_groups(uid):
     """这个 QQ 在哪些群已经开户（= 在那些群注册过）。"""
@@ -3140,6 +3213,8 @@ def _serve():
 
 
 if __name__ == "__main__":
+    # 【v4.17】通道一连上就补刷群名（别再等 30 分钟）
+    PUSHER.bot.on_connect.append(_on_pusher_connect)
     PUSHER.start()
     threading.Thread(target=scheduler, daemon=True).start()
     threading.Thread(target=push_loop, daemon=True).start()
@@ -3147,5 +3222,7 @@ if __name__ == "__main__":
     threading.Thread(target=_group_name_loop, daemon=True).start()
     # 【v4.12.3】缺名字的群即时补拉（新群不用等半小时的全量刷新）
     threading.Thread(target=_group_name_worker, daemon=True).start()
+    # 【v4.17】推送通道重连后立刻补刷群名
+    threading.Thread(target=_group_name_reconnect_watch, daemon=True).start()
     print("[stockmarket] listening on :%s  data=%s" % (CFG["port"], DATA_DIR), flush=True)
     _serve()
