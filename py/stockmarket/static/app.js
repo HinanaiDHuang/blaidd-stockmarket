@@ -1772,18 +1772,18 @@
        + `\u7ba1\u7406\u8d39 ${(st.fee * 100).toFixed(0)}% \u76f4\u63a5\u8fdb\u5168\u6c11\u5206\u7ea2\u6c60\u3002</div>`;
 
     /* 押注区：押对了拿回本金还分盈利，押错了本金进分红池 */
-    h += `<div class="ty-sub">\u62fc\u4e00\u624b</div>`;
+    h += `<div class="ty-sub">\u62bc\u4e00\u624b</div>`;
     if (bt.side) {
-      h += `<div class="ty-line">\u4eca\u5929\u5df2\u62fc <b>${esc(bt.side)}</b> `
+      h += `<div class="ty-line">\u4eca\u5929\u5df2\u62bc <b>${esc(bt.side)}</b> `
          + `${fmtInt(bt.amount)} \u5143\uff0c\u660e\u5929\u7ed3\u7b97\u3002</div>`;
     } else {
       h += `<div class="vote-add">`
-         + `<button class="mini-btn primary" type="button" data-fund="up">\u62fc\u6da8</button>`
-         + `<button class="mini-btn danger" type="button" data-fund="down">\u62fc\u8dcc</button>`
+         + `<button class="mini-btn primary" type="button" data-fund="up">\u62bc\u6da8</button>`
+         + `<button class="mini-btn danger" type="button" data-fund="down">\u62bc\u8dcc</button>`
          + `<span class="r-sub">\u6700\u591a ${fmtInt(bt.max || 0)} \u5143/\u6b21\uff0c\u4eca\u5929 ${bt.left || 0} \u6b21</span>`
          + `</div>`;
-      h += `<div class="fun-hint">\u4f60\u62fc\u7684\u662f\u5bcc\u7684\u4ed3\u4f4d\uff1a\u62fc\u5bf9\u4e86\u62ff\u56de\u672c\u91d1`
-         + `\u8fd8\u5206\u57fa\u91d1\u76c8\u5229\uff0c\u62fc\u9519\u4e86\u672c\u91d1\u76f4\u63a5\u8fdb\u5168\u6c11\u5206\u7ea2\u6c60\u3002</div>`;
+      h += `<div class="fun-hint">\u4f60\u62bc\u7684\u662f\u5bcc\u7684\u4ed3\u4f4d\uff1a\u62bc\u5bf9\u4e86\u62ff\u56de\u672c\u91d1`
+         + `\u8fd8\u5206\u57fa\u91d1\u76c8\u5229\uff0c\u62bc\u9519\u4e86\u672c\u91d1\u76f4\u63a5\u8fdb\u5168\u6c11\u5206\u7ea2\u6c60\u3002</div>`;
     }
 
     if (S.fundBoard && S.fundBoard.length) {
@@ -1796,11 +1796,11 @@
       }
     }
     if (S.fundBets && S.fundBets.length) {
-      h += `<div class="ty-sub">\u62fc\u6ce8\u699c</div>`;
+      h += `<div class="ty-sub">\u62bc\u6ce8\u699c</div>`;
       for (var j = 0; j < S.fundBets.length; j++) {
         var bb = S.fundBets[j];
         h += `<div class="ty-target"><span class="ty-name">${bb.rank}. ${esc(bb.nick)}`
-           + `<span class="r-sub">\u62fc\u4e86\u300c${esc(bb.side)}\u300d</span></span>`
+           + `<span class="r-sub">\u62bc\u4e86\u300c${esc(bb.side)}\u300d</span></span>`
            + `<span class="ty-eq">${fmtInt(bb.amount)}</span></div>`;
       }
     }
@@ -1816,7 +1816,7 @@
   function betFund(side) {
     post("/api/fund", { side: side }).then(function (d) {
       S.msg.fund = d.msg || "";
-      toast(d.msg || "\u5df2\u62fc\u6ce8");
+      toast(d.msg || "\u5df2\u62bc\u6ce8");
       return loadFund();
     }).catch(function (e) { toast(e.message); });
   }
