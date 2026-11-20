@@ -1034,9 +1034,13 @@
     var qty = Number($("qtyInput").value) || 0;
     var cost = qty * c.price;
     var margin = cost / S.lev;
-    var fee = cost * S.cfg.fee_rate;
+    var feeBase = cost, capped = false;
+    var fcap = Number(S.cfg.fee_leverage_cap) || 0;
+    if (fcap > 0 && S.lev > fcap) { feeBase = cost * (fcap / S.lev); capped = true; }
+    var fee = feeBase * (S.cfg.fee_rate || 0);
     var p1 = cost * 0.01 * S.lev;
     $("calc").innerHTML = "预计保证金 <b>" + fmt(margin) + "</b>　手续费 " + fmt(fee) +
+      (capped ? "<span class=\"calc-note\">（已按 " + fcap + " 倍杠杆封顶）</span>" : "") +
       "　涨跌 1% ≈ <b class=\"" + (S.side === "long" ? "up" : "down") + "\">" +
       (S.side === "long" ? "+" : "-") + fmt(p1) + "</b>";
     renderCoolTax();
@@ -1049,7 +1053,6 @@
     var el = $("calcTax");
     if (!el) return;
     var lad = (S.cfg && S.cfg.cooldown_fee_ladder) || [];
-    if (!lad.length) { el.textContent = ""; el.hidden = true; return; }
     var parts = [];
     for (var i = 0; i < lad.length; i++) {
       var sec = Number(lad[i][0]) || 0;
@@ -1058,8 +1061,24 @@
                 : (sec >= 60 ? Math.round(sec / 60) + " 分钟" : sec + " 秒");
       parts.push(label + "内 ×" + m);
     }
-    el.innerHTML = "短线交易费：平仓时按持仓时长加收 —— " + parts.join(" / ") +
-      "。持满 30 分钟以上免收。";
+    var lines = [];
+    if (parts.length) {
+      lines.push("短线交易费：平仓时按持仓时长加收 —— " + parts.join(" / ") +
+        "。持满 30 分钟以上免收。");
+    }
+    var tFree = Number(S.cfg && S.cfg.close_fee_turnover_free) || 0;
+    var tStep = Number(S.cfg && S.cfg.close_fee_turnover_step) || 0;
+    if (tStep > 0) {
+      lines.push("换手阶梯税：当天前 " + tFree + " 笔免罚，之后每 " + tStep +
+        " 笔平仓手续费 ×1（当天平仓越多，单笔越贵）；被强平不计。");
+    }
+    var fcap = Number(S.cfg && S.cfg.fee_leverage_cap) || 0;
+    if (fcap > 0) {
+      lines.push("手续费按不超过 " + fcap + " 倍杠杆的成交额收：" +
+        "1~" + fcap + " 倍杠杆不变，高杠杆只按 " + fcap + " 倍算。");
+    }
+    if (!lines.length) { el.textContent = ""; el.hidden = true; return; }
+    el.innerHTML = lines.join("<br>");
     el.hidden = false;
   }
 
@@ -1831,7 +1850,10 @@
     "<b>\u5168\u6c11\u5206\u7ea2</b>\u628a\u5bcc\u8c6a\u4ea4\u7684\u4f1a\u5458\u8d39\u6309\u6d3b\u8dc3\u5ea6 + \u8d2b\u56f0\u5ea6\u53d1\u56de\u7fa4\u91cc\uff0c\u8d2b\u5b97\u62ff\u5f97\u591a\uff1b",
     "<b>\u6253\u571f\u8c6a</b>\u82b1\u5c0f\u94b1\u62a2\u5bcc\u8c6a\u7684\u73b0\u91d1\uff0c\u8d8a\u5bcc\u8d8a\u597d\u62a2\uff0c\u7ffb\u8f66\u5bf9\u65b9\u53cd\u62ff 20%\uff1b",
     "<b>\u6325\u970d</b>\u82b1\u51c0\u503c\u7684 5% \u6362\u58f0\u671b\uff0c\u58f0\u671b\u8ba9\u4f60\u66f4\u6297\u62a2\uff1b",
-    "<b>\u77ed\u7ebf\u4ea4\u6613\u8d39</b>\uff1a\u6301\u4ed3\u8d8a\u77ed\u624b\u7eed\u8d39\u8d8a\u9ad8\uff082 \u5206\u949f\u5185 5 \u500d\u300110 \u5206\u949f\u5185 2.5 \u500d\u300130 \u5206\u949f\u5185 1.5 \u500d\uff09\uff0c\u60f3\u7701\u624b\u7eed\u8d39\u5c31\u522b\u6765\u56de\u5012\u817e\u3002</p>",
+    "<b>\u624b\u7eed\u8d39</b>\uff1a\u6309\u6210\u4ea4\u989d\u7684 0.1% \u6536\uff0c\u4f46\u300c\u6760\u6746\u5c01\u9876 5 \u500d\u300d\u2014\u20141~5 \u500d\u6760\u6746\u624b\u7eed\u8d39\u4e0d\u53d8\uff0c20 \u500d\u6760\u6746\u4e5f\u53ea\u6309 5 \u500d\u7684\u6210\u4ea4\u989d\u7b97\uff0c\u9ad8\u6760\u6746\u4e0d\u518d\u88ab\u624b\u7eed\u8d39\u5403\u6389\u672c\u91d1\uff1b",
+    "<b>\u77ed\u7ebf\u4ea4\u6613\u8d39</b>\uff1a\u6301\u4ed3\u8d8a\u77ed\u624b\u7eed\u8d39\u8d8a\u9ad8\uff082 \u5206\u949f\u5185 5 \u500d\u300110 \u5206\u949f\u5185 2.5 \u500d\u300130 \u5206\u949f\u5185 1.5 \u500d\uff09\uff0c\u60f3\u7701\u624b\u7eed\u8d39\u5c31\u522b\u6765\u56de\u5012\u817e\uff1b",
+    "<b>\u6362\u624b\u9636\u68af\u7a0e</b>\uff1a\u5f53\u5929\u524d 20 \u7b14\u514d\u7f5a\uff0c\u4e4b\u540e\u6bcf 10 \u7b14\u5e73\u4ed3\u624b\u7eed\u8d39 \u00d71\uff08\u5f53\u5929\u5e73\u4ed3\u8d8a\u591a\uff0c\u5355\u7b14\u8d8a\u8d35\uff09\uff0c\u88ab\u5f3a\u5e73\u4e0d\u8ba1\uff1b",
+    "\u624b\u7eed\u8d39\u662f\u6210\u672c\uff0c\u4e0d\u662f\u60e9\u7f5a\u2014\u2014\u9ad8\u6760\u6746\u5356\u5feb\u624d\u503c\u5f97\uff0c\u5f88\u5feb\u624b\u7eed\u8d39\u5c31\u5403\u6389\u4f60\u7684\u5229\u6da6\u3002</p>",
 
     "<h4>\u2465 \u5c01\u677f\u548c\u5927\u5355</h4>",
     "<p>\u80a1\u4ef7\u6da8\u8dcc\u505c\u662f\u786c\u4e0a\u9650\uff08\u6bcf\u5929 \u00b110%\uff09\u3002\u8dcc\u505c\u4e0a\u7684\u80a1\u300c\u8dcc\u4e0d\u4e0b\u53bb\u300d\uff0c\u6da8\u505c\u4e0a\u7684\u80a1\u300c\u6da8\u4e0d\u52a8\u300d\u2014\u2014\u771f\u5b9e\u5e02\u573a\u4e0d\u4f1a\u8fd9\u6837\uff0c\u6240\u4ee5\u672c\u7ad9<b>\u8d34\u7740\u6da8\u8dcc\u505c\u7684\u80a1\u7968\u6682\u65f6\u4e0d\u80fd\u5efa\u4ed3</b>\uff08<b>\u5e73\u4ed3\u968f\u65f6\u80fd\u8dd1</b>\uff09\uff0c\u7b49\u5f00\u677f\u518d\u8bf4\uff1b\u5355\u5b50\u592a\u5927\u4e5f\u4f1a\u53d8\u5dee\u4ef7\uff1a<b>\u51b2\u51fb\u6210\u672c</b>\u2014\u2014\u4e00\u5f20\u5355\u5403\u6389\u5f53\u5929\u5927\u90e8\u5206\u6210\u4ea4\u989d\uff0c\u4e70\u8fdb\u6765\u5c31\u591a\u4ed8\u4e00\u622a\u3001\u5356\u51fa\u53bb\u5c31\u5c11\u62ff\u4e00\u622a\uff0c\u8fd9\u90e8\u5206\u8fdb<b>\u5168\u6c11\u5206\u7ea2\u6c60</b>\uff1b\u666e\u901a\u5c0f\u5355\u57fa\u672c\u611f\u89c9\u4e0d\u5230\u3002</p>",

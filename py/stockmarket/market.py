@@ -92,6 +92,82 @@ def cooldown_mult(cfg, hold_seconds):
     return 1.0
 
 
+def fee_leverage_cap(cfg):
+    """手续费杠杆封顶值（0 = 不封顶）。
+
+    【v4.19 手续费去杠杆化】手续费本来按「成交额」收，于是杠杆放大的不只是盈亏，
+    手续费也被同样放大：20 倍杠杆下成交额是保证金的 20 倍，
+    一次 0.1% 的手续费就等于本金的 2%。
+
+    封顶的口径是「手续费按不超过 cap 倍杠杆的成交额算」：
+        手续费基数 = 成交额 x min(1, cap / 杠杆)
+    所以杠杆 <= cap 的单子**完全不受影响**，杠杆越高，手续费越接近按 cap 倍收。
+    换算成「占保证金的比例」更直观：无论 1 倍还是 20 倍，
+    手续费占保证金的比例最高就是 cap x fee_rate。
+
+    【为什么开仓、平仓都要封】
+    现网实测（主群 11-17~11-20，剔掉 whale）：玩家手续费里
+    **开仓费占 47.4%**，平仓费占 52.6%。
+    只封平仓费 = 只解决一半 —— 16~20 倍玩家的总手续费负担
+    只从 4.58% 降到 2.78%（占保证金），两端都封才降到 1.15%。
+    开仓费不封的话，"手续费太重"这个抱怨就还在。
+
+    【口径统一】
+    开仓、平仓、强制平仓用的是同一个 cap，手续费的档位折扣（v4.7）
+    和冷却税倍率照旧乘在封顶后的基数上。
+    """
+    try:
+        cap = cfg.get("fee_leverage_cap")
+        if cap is None:
+            cap = cfg.get("close_fee_leverage_cap")   # 兼容旧配置名
+        return float(cap or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def turnover_mult(cfg, n_today):
+    """当日换手阶梯倍率：今天平仓越多，手续费越贵。返回 >= 1.0 的倍率。
+
+    【为什么要这条】
+    v4.19 把手续费基数按杠杆封顶之后，「高杠杆短线」的单笔成本降下来了，
+    但同时也把**唯一压制脚本刷单的闸门**给拆了 ——
+    现网实测（主群 11-18）：Anyisdragon 一天 27 笔 20 倍单，
+    平仓手续费吃掉 906 万，而那天的毛盈亏才 +220 万。
+    冷却税只管「持仓时长」，管不住「一天几百笔」。
+
+    【为什么用「连续递增」而不是阶梯】
+    阶梯（比如 20/50/100 笔分档）留了一个洞：脚本只要每天做 19 笔，
+    就永远待在最便宜的那一档，把交易摊到很多天慢慢刷。
+    连续递增没有这个洞 ——
+        倍率 = 1 + max(0, 今日已平仓笔数 - free) / step
+    每天做得越多，单笔越贵；做得少，单笔就便宜。
+    于是「刷单」在任何频率下都不划算，「正常玩」不受影响。
+
+    【现实依据】
+    1. 程序化交易报告制度 + 高频差异化收费：交易所 / 券商对频繁申报额外收费；
+    2. 券商柜台 API 委托频率上限（个人 API 常见 1~3 笔/秒），超频会被限流或加价；
+    3. 异常交易监控：短时间内大量反复申报会被重点关注，费用与限制同时收紧。
+
+    【口径】
+    n_today = 玩家**今天已平仓笔数**（不含本次这笔；强平不计入 ——
+    被强平不是玩家自己选的，不该再罚一次）。
+    参数：cfg["close_fee_turnover_free"]（免罚笔数）、
+          cfg["close_fee_turnover_step"]（每多少笔 +1 倍）。
+    两者都为 0 时关闭（返回 1.0）。
+    """
+    try:
+        free = float(cfg.get("close_fee_turnover_free", 0) or 0)
+        step = float(cfg.get("close_fee_turnover_step", 0) or 0)
+    except (TypeError, ValueError):
+        return 1.0
+    if step <= 0:
+        return 1.0
+    extra = (float(n_today) - free) / step
+    if extra <= 0:
+        return 1.0
+    return 1.0 + extra
+
+
 def day_start(now_ts=None):
     """今天 0 点的时间戳（本地时区）。"""
     t = time.localtime(now_ts if now_ts is not None else now())
@@ -452,7 +528,11 @@ def place_order(db, cfg, qq, cid, side, qty, leverage, price=None):
     margin = cost / leverage
     # 【v4.7】高档位手续费折扣（特权之一）
     disc = tiers.fee_discount(acct["equity"]) if acct else 0.0
-    fee_full = cost * cfg["fee_rate"] * (1.0 - disc)
+    # 【v4.19 手续费去杠杆化】开仓费和平仓费同一口径：基数按杠杆封顶。
+    # 详见 fee_leverage_cap 的说明。封顶只动基数，折扣照旧乘在上面。
+    _fcap = fee_leverage_cap(cfg)
+    _fee_base = cost * (_fcap / leverage) if (_fcap > 0 and leverage > _fcap) else cost
+    fee_full = _fee_base * cfg["fee_rate"] * (1.0 - disc)
     # 先按「不打折」的钱判断够不够：不够就直接失败，
     # 免手续费券要等到真能成交时才扣 —— 之前是「先扣券再判余额」，
     # 下单失败（钱不够 / 熔断 / 票据过期）券就没了，玩家白丢一次券。
@@ -567,10 +647,57 @@ def close_position(db, cfg, qq, pos_id, force=False, qty=None):
     except (TypeError, ValueError):
         hold = 0.0
     cd_mult = 1.0 if force else cooldown_mult(cfg, hold)
-    fee = qty * price * cfg["fee_rate"] * (1.0 - disc) * (2 if force else 1) * cd_mult
+    # 【v4.19 手续费去杠杆化】手续费按「封顶后的成交额」收。
+    #
+    # 【为什么要封顶】手续费本来按成交额算，于是 20 倍杠杆下
+    # 短线冷却税 x5 = 成交额 0.5% = **本金的 10%/笔**。
+    # 设计注释写的是「精准打击高杠杆短线」，实际打的是所有高杠杆玩家 ——
+    # 杠杆放大的不只是盈亏，手续费也被同样放大了。
+    #
+    # 【怎么封顶】手续费基数从「成交额」改成 `成交额 x min(1, cap/杠杆)`，
+    # cap = close_fee_leverage_cap（0 = 不封顶，默认关）。
+    # 等价于「手续费按不超过 cap 倍杠杆的成交额算」：
+    # 杠杆 <= cap 的单子完全不受影响；杠杆越高，手续费越接近按 cap 倍收。
+    # 注意封顶的是**手续费基数** —— fee_rate / 档位折扣 / 冷却税倍率照旧乘在上面。
+    fee_base = qty * price
+    margin_out = p["margin"] * part
+    try:
+        lev = max(1.0, float(p["leverage"] or 1))
+    except (TypeError, ValueError):
+        lev = 1.0
+    _fcap = fee_leverage_cap(cfg)
+    if _fcap > 0 and lev > _fcap:
+        fee_base = fee_base * (_fcap / lev)
+    fee = fee_base * cfg["fee_rate"] * (1.0 - disc) * (2 if force else 1) * cd_mult
+    # 【v4.19-C】冷却税按「保证金」封顶（可选，默认关）。
+    #
+    # 冷却税的定位是「罚短线」，但它按成交额收 —— 杠杆一放大就变成
+    # 「本金 10%/笔」这种劝退数字。把它按保证金封顶，
+    # 等于「罚短线，但罚的是本金而不是成交额」：
+    # 20 倍杠杆下，冷却税最多吃掉 margin x close_fee_cooldown_margin_pct。
+    #
+    # 【实测：默认关是对的】在 fee_leverage_cap=5 的前提下，
+    # 20 倍短线仓的冷却税本来只占保证金 2.5%，
+    # 而封顶阈值 2%~4% 根本碰不到 —— 沙盘实测三种取值（2/3/4%）结果**完全一样**。
+    # 这条旋钮只有把 fee_leverage_cap 调回 0 才有意义，留着当备用。
+    cool_cap = float(cfg.get("close_fee_cooldown_margin_pct", 0) or 0)
+    if cool_cap > 0 and cd_mult > 1.0:
+        cool_part = fee * (cd_mult - 1.0) / cd_mult
+        fee = fee - cool_part + min(cool_part, margin_out * cool_cap)
+    # 【v4.19-B】当日换手阶梯税（连续递增），见 turnover_mult。
+    # 强平不吃换手税：被强平不是玩家自己选的短线交易，
+    # 强平手续费本来就已经是 2 倍，再叠一层换手税是双重处罚。
+    # （强平同样**不计入**当天的换手计数 —— 上面那条 SQL 只数 kind='close'。）
+    if not force and float(cfg.get("close_fee_turnover_step", 0) or 0) > 0:
+        try:
+            _row = db.q1("SELECT COUNT(*) c FROM trades WHERE qq=? AND ts>=? AND kind='close'",
+                         (qq, day_start()))
+            n_today = int(_row["c"] or 0)
+        except Exception:
+            n_today = 0
+        fee *= turnover_mult(cfg, n_today)
     if not force and coupons.use(db, qq, "fee_free", 1):
         fee = 0.0
-    margin_out = p["margin"] * part
     # 【v4.11】强平手续费不得把现金扣成负数。
     # 逐笔止损那条线是「这笔的亏损正好等于它自己的保证金」，此时
     # margin_out + pl 已经被亏成 0，再扣一次强平手续费（2 倍）就会把现金打成负数
