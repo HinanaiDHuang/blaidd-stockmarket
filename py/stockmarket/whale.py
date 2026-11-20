@@ -287,8 +287,22 @@ def _settle_day(db, cfg, day):
         win_side = SIDE_DOWN
     else:
         win_side = None
-    if win_side is None and to_betters > 0:
-        to_pool += to_betters                # 平盘：没人押对，这钱给群友
+    # ---- 先算出押注赢家（决定 to_betters 有没有人领）----
+    bet_total = round(sum(v[1] for v in bets.values()), 2)
+    winners = {}
+    loser_total = 0.0
+    for qq, (side, amt) in bets.items():
+        if win_side and side == win_side:
+            winners[qq] = amt
+        else:
+            loser_total += amt
+    winner_total = round(sum(winners.values()), 2)
+
+    # 【v4.13 修正】没人押对时，to_betters 根本没有归属 —— 必须并进全民分红池。
+    # 之前这里是「算了但没人领」：钱凭空蒸发了，每天最多 bet_cap（3 万）。
+    # 现在平盘 / 没人押 / 全押错，三种情况统一走这一条，账一定平。
+    if winner_total <= 0 and to_betters > 0:
+        to_pool += to_betters
         to_betters = 0.0
 
     # 群友侧设绝对上限：鲸鱼的体量是中位数的 500 万倍，
@@ -318,16 +332,7 @@ def _settle_day(db, cfg, day):
                 _ledger(db, qq, -pay, RET_MARK + "·亏损")
                 losers += 1
 
-    # ---- 押注结算 ----
-    bet_total = round(sum(v[1] for v in bets.values()), 2)
-    winners = {}
-    loser_total = 0.0
-    for qq, (side, amt) in bets.items():
-        if win_side and side == win_side:
-            winners[qq] = amt
-        else:
-            loser_total += amt
-    winner_total = round(sum(winners.values()), 2)
+    # ---- 押注结算（winners / loser_total 上面已经算好）----
     for qq, amt in winners.items():
         bonus = (to_betters * (amt / winner_total)) if winner_total > 0 else 0.0
         back = amt + bonus

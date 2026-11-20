@@ -175,8 +175,13 @@ def scenario(tag, ret):
     gain = P * ret * LEV
     fee = P * FEE
     rest = P + gain - fee
-    tb = min(max(rest, 0.0) * BET_C, BET_CAP) if rest > 0 else 0.0
-    tp = min(max(rest, 0.0) * POOL_R, POOL_CAP) if rest > 0 else 0.0
+    # v4.13 修正后：scenario 里没有群友押注 => to_betters 没有归属，
+    # 必须并进全民分红池（以前是「算了但没人领」，钱凭空蒸发）。
+    tb = max(rest, 0.0) * BET_C if rest > 0 else 0.0
+    tp = max(rest, 0.0) * POOL_R if rest > 0 else 0.0
+    tp += tb
+    tb = 0.0
+    tp = min(tp, POOL_CAP)
     tf = rest - tb - tp
     expect_cash = max(0.0, P + tf)      # 现金不够时最多扣到 0
     expect_pool = pool0 + tp + fee
@@ -292,6 +297,49 @@ for i in range(120):
         paid += float(info["amount"])
 check("T7.1 池子大时分红总额能突破旧上限 8000", paid > 8000.0, paid)
 check("T7.2 分红池真的被取走了", tycoon.pool_get(db) < 1000000.0, tycoon.pool_get(db))
+
+# ============================================================ T8 没人押对时钱不许消失
+print("[T8] 没人押对：to_betters 必须并进分红池（一分钱都不许凭空蒸发）")
+db = new_db("t8")
+c1 = mk_company(db, "票一", "T1", 100.0)
+mk_px(db, c1, "票一", 100.0, 110.0)          # 涨 10%
+P = 1000000.0
+mk_user(db, "9951", "出资人", 2 * P)
+pool0 = tycoon.pool_get(db)
+total_before = cash_of(db, "9951") + pool0
+add_ledger(db, "9951", -P, whale.CONTRIB_MARK)
+db.ex("UPDATE users SET cash=cash-? WHERE qq=?", (P, "9951"))
+whale._settle_day(db, cfg, DAY)
+total_after = cash_of(db, "9951") + tycoon.pool_get(db)
+gain = P * 0.10 * LEV
+check("T8.1 全系统净变化 == 基金盈亏（没有一分钱消失）",
+      abs((total_after - total_before) - gain) < 2.0,
+      (total_after - total_before, gain))
+check("T8.2 没人押注时 bet_cap 那笔钱进了分红池",
+      tycoon.pool_get(db) - pool0 >= min(max(P + gain - P * FEE, 0.0) * BET_C,
+                                        BET_CAP) - 2.0,
+      (tycoon.pool_get(db) - pool0,))
+
+# 全押错：押注本金进分红池，to_betters 同样不许消失
+db = new_db("t8b")
+c1 = mk_company(db, "票一", "T1", 100.0)
+mk_px(db, c1, "票一", 100.0, 90.0)           # 跌 10%
+mk_user(db, "9952", "出资人", 2 * P)
+mk_user(db, "9953", "押涨的", 5000.0)
+pool0 = tycoon.pool_get(db)
+total_before = cash_of(db, "9952") + cash_of(db, "9953") + pool0
+add_ledger(db, "9952", -P, whale.CONTRIB_MARK)
+db.ex("UPDATE users SET cash=cash-? WHERE qq=?", (P, "9952"))
+add_ledger(db, "9953", -1000.0, whale.BET_MARK + "·涨")
+db.ex("UPDATE users SET cash=cash-? WHERE qq=?", (1000.0, "9953"))
+whale._settle_day(db, cfg, DAY)
+total_after = cash_of(db, "9952") + cash_of(db, "9953") + tycoon.pool_get(db)
+gain2 = P * (-0.10) * LEV
+check("T8.3 全押错时账也平（净变化 == 基金盈亏）",
+      abs((total_after - total_before) - gain2) < 2.0,
+      (total_after - total_before, gain2))
+check("T8.4 押错的人本金进了分红池", tycoon.pool_get(db) - pool0 > 0.0,
+      (tycoon.pool_get(db) - pool0,))
 
 print("")
 if FAILED:
