@@ -493,7 +493,7 @@ def fund_text(db, cfg, qq=None):
                                float(cfg.get("fund_max", 2000000)) / 10000.0))
     lines.append("· 基金拿这笔钱 %.0f 倍杠杆押「全市场等权涨跌」—— "
                  "涨了分、跌了出资人自己扛" % float(cfg.get("fund_leverage", 3.0)))
-    lines.append("· 管理费 %.0f%%/天直接销毁（这就是富豪的「消费」）"
+    lines.append("· 管理费 %.0f%%/天直接进全民分红池（这就是富豪的「消费」）"
                  % (float(cfg.get("fund_fee", 0.05)) * 100))
     lines.append("· 群友可以「押基金 涨」/「押基金 跌」，最多 %.0f 元/次"
                  % float(cfg.get("fund_bet_max", 1000)))
