@@ -1325,6 +1325,39 @@ function stock_board_lux(msg)
     return board_lines(j, "lux")
 end
 
+-- 财阀基金（v4.13）：富豪的高风险资金池 + 群友押方向
+function stock_fund(msg)
+    local qq, nick = cur_qq_nick(msg)
+    local raw = msg.fromMsg or ""
+    local head = string.match(raw, "^%s*([^%s]+)") or ""
+    local rest = string.match(raw, "^%s*[^%s]+%s+(.+)$") or ""
+    rest = rest:gsub("^%s+", ""):gsub("%s+$", "")
+    local side = ""
+    if rest == "" then
+        if head == "押涨" or head == "看涨" then side = "涨"
+        elseif head == "押跌" or head == "看跌" then side = "跌" end
+    else
+        side = rest
+    end
+    if side ~= "" then
+        if side == "涨" or side == "多" or side == "看涨" or side == "up" or side == "long" then
+            side = "涨"
+        elseif side == "跌" or side == "空" or side == "看跌" or side == "down" or side == "short" then
+            side = "跌"
+        else
+            return "用法：押基金 涨　/　押基金 跌\n（押对了拿回本金还分基金盈利，押错了本金直接进全民分红池）"
+        end
+        local j = api_post("/api/g/fund", { g = cur_gid(msg), u = qq, nick = nick, side = side })
+        if not j then return "炒股服务没响应" end
+        if j.code ~= 200 then return "押注失败：" .. (j.message or "") end
+        return j.data.msg
+    end
+    local j = api_get(string.format("/api/g/fund?g=%s&u=%s", cur_gid(msg), qq))
+    if not j then return "炒股服务没响应" end
+    if j.code ~= 200 then return "查询失败：" .. (j.message or "") end
+    return (j.data and j.data.text) or ""
+end
+
 msg_order["炒股"] = "chaogu"
 msg_order["重置口令"] = "reset_passcode"
 msg_order["重置登录口令"] = "reset_passcode"
@@ -1444,3 +1477,13 @@ msg_order["贫富差距"] = "stock_wealth"
 msg_order["战果榜"] = "stock_board_rob"
 msg_order["打劫榜"] = "stock_board_rob"
 msg_order["挥霍榜"] = "stock_board_lux"
+-- v4.13 财阀基金
+msg_order["财阀基金"] = "stock_fund"
+msg_order["富豪基金"] = "stock_fund"
+msg_order["基金"] = "stock_fund"
+msg_order["押基金"] = "stock_fund"
+msg_order["押涨"] = "stock_fund"
+msg_order["押跌"] = "stock_fund"
+msg_order["看涨"] = "stock_fund"
+msg_order["看跌"] = "stock_fund"
+msg_order["挑战首富"] = "stock_fund"

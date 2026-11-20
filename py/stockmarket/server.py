@@ -17,6 +17,15 @@ import urllib.parse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# Windows 服务的 stdout 默认是 GBK，推送文案里有 emoji（🏛 🎲 🪙…），
+# 一旦被 except 分支 print 出来就会 UnicodeEncodeError 把日志打挂。
+# 这里统一改成 UTF-8 + replace，坏字符只会被替换掉，不会让服务崩。
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 from flask import Flask, jsonify, request, send_from_directory
 from werkzeug.exceptions import HTTPException
 
@@ -32,6 +41,7 @@ import orders
 import recovery
 import wealth
 import tycoon
+import whale
 from engine import Engine
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -107,6 +117,20 @@ TOKEN_TTL = 60 * 60 * 24 * int(CFG.get("token_ttl_days", 7))
 # 每次发版往里加一段（最新的放最前面）。
 # 主人明说不要在群里发公告，那就把变更说清楚放网页上。
 CHANGELOG = [
+    {
+        "ver": "v4.13",
+        "date": "2026-11-20",
+        "title": "财阀基金：富豪的钱有了带风险的去处",
+        "items": [
+            "新玩法「财阀基金」：净值 1500 万以上的富豪，每天自动把净值的 5% 押进一个带 3 倍杠杆的市场赌局",
+            "基金涨跌都算富豪的：市场跌了，出资人自己扛；市场涨了，三成分给押对的群友，五成和管理费一起进全民分红池",
+            "群友可以「押基金 涨」/「押基金 跌」，一次最多 1000 元；押错的钱直接进全民分红池，不给赢家",
+            "会员费的封顶不再是一刀切的 3 万：改成 max(3万, 净值×0.26%)，巨富不再免税",
+            "新增持仓税：净值 500 万以上、仓位里的钱每天按保证金 0.1% 交税 —— 钱锁在仓位里复利也要交税",
+            "分红池改成按余额比例发放：池子里趴着多少钱，每天就按比例发多少（原来上限写死 8000，池子再大也发不出去）",
+            "大户仓位上限：净值 5000 万以上的账户，总名义仓位不超过「自有净资产」（净值 − 保证金）的 20 倍（原来能开到净值的 60~90 倍）",
+        ],
+    },
     {
         "ver": "v4.12.3",
         "date": "2026-11-19",
@@ -1920,6 +1944,36 @@ def api_g_tier():
     return ok({"st": st, "text": tycoon.tier_text(handle, CFG, uid), "g": gid})
 
 
+@app.route("/api/g/fund", methods=["GET", "POST"])
+def api_g_fund():
+    """群里的「财阀基金」：富豪的高风险资金池 + 群友押方向。"""
+    if not check_admin(request.args.get("admin", "")):
+        return fail("非法请求", 403)
+    if request.method == "GET":
+        uid = request.args.get("u", "")
+        gid = _resolve_gid(request.args.get("g"), uid)
+        if not gid:
+            return fail("还没找到你所在的群")
+        handle = dbmod.get_db(DATA_DIR, gid)
+        st = whale.fund_status(handle, CFG, uid)
+        if st is None:
+            return fail("你还没有账户，先在群里发一次「炒股」")
+        return ok({"st": st, "text": whale.fund_text(handle, CFG, uid),
+                   "board": whale.fund_board(handle, CFG, 10),
+                   "bets": whale.bet_board(handle, CFG, 10), "g": gid})
+    j = request.get_json(silent=True) or {}
+    handle, uid, gid, err = _admin_ctx(j.get("u"), j.get("g"), j.get("nick", ""))
+    if err:
+        return err
+    side = str(j.get("side", "") or "").strip()
+    if not side:
+        return fail("用法：押基金 涨　/　押基金 跌")
+    okk, msg, info = whale.bet_fund(handle, CFG, uid, side)
+    if not okk:
+        return fail(msg)
+    return ok({"msg": msg, "info": info, "g": gid}, msg)
+
+
 @app.route("/api/g/rob", methods=["GET", "POST"])
 def api_g_rob():
     """群里的「打土豪」：花小钱去抢有钱人的现金。"""
@@ -2836,14 +2890,25 @@ def scheduler():
                     # 【v4.7】跨天结算：收会员费 + 声望衰减 + 强制清盘。
                     # 放在 daily_day 落库之后，异常也不会影响行情推进。
                     try:
-                        _fc, _ft = tycoon.settle_day(handle, CFG)
+                        _fc, _ft, _mc, _mt = tycoon.settle_day(handle, CFG)
                         if _fc:
                             PUSHER.send_group(
                                 gid,
                                 "👑 会员费已自动扣除：%d 位大户共交 %.0f 元，"
                                 "全部进了全民分红池。" % (_fc, _ft))
+                        if _mc:
+                            PUSHER.send_group(
+                                gid,
+                                "🏛 持仓税：%d 位大户的仓位共交 %.0f 元，"
+                                "进了全民分红池（钱锁在仓位里复利也要交税）。" % (_mc, _mt))
                         for _qq, _m in wealth.auto_liquidate(handle, CFG):
                             PUSHER.send_group(gid, "⚖️ 交易所强制清盘\n" + _m)
+                        # 【v4.13】财阀基金：先结算昨天（分钱给押对的群友、
+                        # 亏损从出资人兜里扣），再收今天的新出资。
+                        _fund_msg = whale.settle_fund(handle, CFG)
+                        if _fund_msg:
+                            PUSHER.send_group(gid, _fund_msg)
+                        whale.collect_fund(handle, CFG)
                     except Exception as exc:
                         print("[stockmarket] settle_day error:", exc, flush=True)
                 # 【v4.11 性能】只扫「有可能被强平 / 破产 / 计提利息」的人：

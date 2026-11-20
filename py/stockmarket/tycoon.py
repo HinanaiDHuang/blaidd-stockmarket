@@ -138,8 +138,7 @@ def tier_status(db, cfg, qq):
     eq = _equity(db, cfg, qq)
     t = tiers.tier_of(eq)
     nxt = tiers.next_tier(eq)
-    cap = float(cfg.get("tycoon_fee_cap", 30000))
-    fee = min(max(eq, 0) * float(t["fee"]), cap)
+    fee = min(max(eq, 0) * float(t["fee"]), tiers.fee_cap(cfg, eq))
     lev_cap = int(cfg.get("max_leverage", 20)) + int(t["lev"])
     return {
         "qq": qq,
@@ -170,9 +169,14 @@ def tier_text(db, cfg, qq):
     lines.append("· 当前档位：%s（净值 %.2f）" % (st["tier"], st["equity"]))
     if st["fee_rate"] > 0:
         state = "今天已交" if st["paid_today"] else "明天自动扣"
-        lines.append("· 每日会员费：%.2f 元（%.2f%%，封顶 %.0f）—— %s"
-                     % (st["fee"], st["fee_rate"] * 100,
-                        float(cfg.get("tycoon_fee_cap", 30000)), state))
+        cap_ratio = float(cfg.get("tycoon_fee_cap_ratio", 0) or 0)
+        if cap_ratio > 0:
+            cap_txt = "max(%.0f, 净值×%.2f%%)" % (
+                float(cfg.get("tycoon_fee_cap", 30000)), cap_ratio * 100)
+        else:
+            cap_txt = "%.0f" % float(cfg.get("tycoon_fee_cap", 30000))
+        lines.append("· 每日会员费：%.2f 元（%.2f%%，封顶 %s）—— %s"
+                     % (st["fee"], st["fee_rate"] * 100, cap_txt, state))
         lines.append("· 特权：杠杆上限 %dx、手续费 -%.0f%%、打工工资 +%.0f%%"
                      % (st["lev_cap"], st["fee_disc"] * 100, st["wage_bonus"] * 100))
         if st["next_tier"]:
@@ -201,7 +205,6 @@ def collect_fees(db, cfg):
     if db.get_meta(FEE_DAY_KEY, "") == today:
         return 0, 0.0
     db.set_meta(FEE_DAY_KEY, today)
-    cap = float(cfg.get("tycoon_fee_cap", 30000))
     rows = db.q("SELECT qq FROM users")
     total = 0.0
     count = 0
@@ -214,7 +217,7 @@ def collect_fees(db, cfg):
         ratio = tiers.fee_ratio(eq)
         if ratio <= 0:
             continue
-        fee = min(eq * ratio, cap)
+        fee = min(eq * ratio, tiers.fee_cap(cfg, eq))
         if fee < 1:
             continue
         cash = _cash(db, qq)
@@ -249,15 +252,55 @@ def decay_day(db, cfg):
             db.ex("UPDATE users SET rob_heat=0 WHERE qq=?", (r["qq"],))
 
 
+def collect_margin_tax(db, cfg):
+    """持仓保证金税：钱锁在仓位里复利，也要交税。
+
+    【为什么打的是保证金而不是现金】
+    富豪可以把现金清空（2026-11-20 实测：Kaito 清仓后现金 534 亿、无仓位），
+    但只要还有仓位，保证金就在那儿 —— 那是**正在复利的钱**。
+    对净值 ≥ margin_tax_min_equity 且有持仓的人，
+    按保证金总额收 margin_tax_ratio（默认 0.1%/天），进全民分红池。
+
+    跟会员费一样是**转移**不是增发：全群总现金守恒。
+    """
+    min_eq = float(cfg.get("margin_tax_min_equity", 5000000))
+    ratio = float(cfg.get("margin_tax_ratio", 0.001))
+    if ratio <= 0:
+        return 0, 0.0
+    rows = db.q("SELECT qq, SUM(margin) m FROM positions WHERE status='open' GROUP BY qq")
+    total = 0.0
+    count = 0
+    for r in rows:
+        qq = str(r["qq"])
+        mg = float(r["m"] or 0)
+        if mg <= 0:
+            continue
+        if _equity(db, cfg, qq) < min_eq:
+            continue
+        tax = round(mg * ratio, 2)
+        if tax < 1:
+            continue
+        cash = _cash(db, qq)
+        if cash <= tax:
+            continue
+        db.ex("UPDATE users SET cash=cash-? WHERE qq=?", (tax, qq))
+        _ledger(db, qq, -tax, "持仓税")
+        pool_add(db, tax)
+        total += tax
+        count += 1
+    return count, round(total, 2)
+
+
 def settle_day(db, cfg):
     """每日结算入口（调度器跨天时调一次）。"""
     count, total = collect_fees(db, cfg)
+    mcount, mtotal = collect_margin_tax(db, cfg)
     decay_day(db, cfg)
     seed = float(cfg.get("dividend_pool_seed", 8000))
     if db.get_meta("dividend_pool_seeded", "") != "1":
         db.set_meta("dividend_pool_seeded", "1")
         pool_set(db, max(pool_get(db), seed))
-    return count, total
+    return count, total, mcount, mtotal
 
 # ================================================================ 打土豪
 def _find_target(db, key):
@@ -632,14 +675,20 @@ def claim_dividend(db, cfg, qq):
     if not _active_today(db, qq):
         return False, ("今天你还没冒过泡（签到 / 打工 / 交易都算），"
                        "先去群里活跃一下，明天的分红才拿得多"), None
+    pool = pool_get(db)
     cap = float(cfg.get("dividend_daily_cap", 8000))
+    # 【v4.13】池子大了就按比例多发：富豪的钱进了分红池，穷人就能多拿一点。
+    # 原来上限是死的 8000 元/天 —— 主群池子里趴着 74 万，一天只发 8000，
+    # 富人的钱进了池子也发不出去。比例上限跟池子走，池子空了自然发不动。
+    rate = float(cfg.get("dividend_pool_rate", 0) or 0)
+    if rate > 0:
+        cap = max(cap, pool * rate)
     used_row = db.q1("SELECT COALESCE(SUM(delta),0) s FROM ledger "
                      "WHERE ts>=? AND reason LIKE ?", (_day_start(), DIV_MARK + "%"))
     used = float(used_row["s"] or 0)
     room = max(0.0, cap - used)
     if room < 1:
         return False, "今天的分红已经发满了（上限 %.0f），明天再来" % cap, None
-    pool = pool_get(db)
     amt = dividend_amount(cfg, _equity(db, cfg, qq), _streak_days(db, qq))
     if pool < amt:
         # 池子见底：交易所按「印钞上限」垫一笔（不是无限印）

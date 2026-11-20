@@ -73,6 +73,26 @@ def fee_ratio(equity):
     return float(tier_of(equity)["fee"])
 
 
+def fee_cap(cfg, equity):
+    """会员费封顶：绝对底值 + 净值比例。
+
+    【为什么要改（v4.13）】原来 tycoon_fee_cap 是**绝对值** 30000：
+    净值 534 亿的巨富按 0.26% 该缴 1390 万，封顶 3 万 —— 等于免税。
+    这是现有机制最大的漏洞：越有钱，交的税越接近于零。
+    现在封顶跟着净值走（tycoon_fee_cap_ratio），巨富该交多少交多少。
+
+    中小玩家完全不受影响：净值低于 1150 万时
+    max(30000, 净值×0.26%) 还是 30000，而他们按费率交的钱本来就远低于 30000
+    （1500 万财阀档 = 3.9 万，才刚过 3 万这条线）。
+    """
+    cfg = cfg or {}
+    base = float(cfg.get("tycoon_fee_cap", 30000))
+    ratio = float(cfg.get("tycoon_fee_cap_ratio", 0) or 0)
+    if ratio <= 0:
+        return base
+    return max(base, max(0.0, float(equity or 0)) * ratio)
+
+
 def lev_bonus(equity):
     """特权：杠杆上限加成。"""
     return int(tier_of(equity)["lev"])
@@ -105,14 +125,19 @@ def tier_lines(cfg=None):
     """档位说明文本（给群友看的规则表）。"""
     cfg = cfg or {}
     cap = float(cfg.get("tycoon_fee_cap", 30000))
+    cap_ratio = float(cfg.get("tycoon_fee_cap_ratio", 0) or 0)
+    if cap_ratio > 0:
+        cap_txt = "max(%.1f 万, 净值×%.2f%%)" % (cap / 10000, cap_ratio * 100)
+    else:
+        cap_txt = "%.1f 万" % (cap / 10000)
     lines = ["👑 净值分层（会员费每天自动收，进全民分红池）"]
     for t in TIERS:
         if t["fee"] <= 0:
             lines.append("· %s：不用交钱" % t["name"])
             continue
-        lines.append("· %s：净值≥%s 万，每日会员费 %.2f%%（封顶 %.1f 万）"
+        lines.append("· %s：净值≥%s 万，每日会员费 %.2f%%（封顶 %s）"
                      "｜杠杆上限 +%d、手续费 -%.0f%%、打工 +%.0f%%" % (
                          t["name"], int(t["min"] / 10000), t["fee"] * 100,
-                         cap / 10000, t["lev"], t["fdisc"] * 100, t["wage"] * 100))
+                         cap_txt, t["lev"], t["fdisc"] * 100, t["wage"] * 100))
     lines.append("会员费不是罚款，是你留在牌桌上的门票费 —— 不交钱就没有特权")
     return "\n".join(lines)

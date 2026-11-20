@@ -310,6 +310,37 @@ def place_order(db, cfg, qq, cid, side, qty, leverage, price=None):
                            "你现在已经压了 %.2f，这笔还要 %.2f。"
                            "先平掉一部分仓位，或者等行情走一波。" % (
                                acct["equity"], cap, ratio, acct["margin"], margin)), None
+    # 【v4.13】大户名义仓位上限：收敛「钱多 → 赚更多」的放大器。
+    #
+    # 为什么必须有这条：max_margin_ratio=3.0 配合 20~30 倍杠杆，
+    # 意味着总**名义**仓位可以开到净值的 60~90 倍。
+    # 1% 的日内波动 = 净值 ±15% —— 这就是差距真正的放大器。
+    # 现网实测（2026-11-20）：主群 Kaito 一天之内 100.45 亿 → 534.57 亿，
+    # 当天 167 笔交易，全是 20 倍杠杆的日内单。
+    #
+    # 只对「大户」生效（净值 ≥ whale_notional_min_equity）：
+    # 中小玩家仓位本来也压不到那个量级，不受影响。
+    notional_ratio = float(cfg.get("whale_notional_ratio", 0) or 0)
+    notional_min_eq = float(cfg.get("whale_notional_min_equity", 50000000))
+    if notional_ratio > 0 and acct and acct["equity"] >= notional_min_eq:
+        # 【基准必须是「自有净资产」= 净值 - 保证金】
+        # 拿净值当基准的话这条永远不会触发：净值里含保证金，
+        # 而保证金 = 名义/杠杆，于是 20×净值 = 20×现金 + 名义，
+        # 左边永远小于右边 —— 等于没写。
+        # 用自有净资产（现金 + 浮动盈亏 - 欠款）当基准才有约束力：
+        # 20 倍杠杆下等价于「保证金 ≤ 自己的现金」。
+        own = acct["equity"] - acct["margin"]
+        cur_notional = 0.0
+        for p in acct["positions"]:
+            cur_notional += float(p["qty"]) * float(p["price"])
+        ncap = max(0.0, own) * notional_ratio
+        if cur_notional + cost > ncap:
+            return False, ("大户仓位太重了：你的自有净资产（净值 %.2f - 保证金 %.2f = %.2f）"
+                           "最多压 %.0f 的名义仓位（%.0f 倍上限），"
+                           "你现在已经压了 %.2f，这笔还要 %.2f。"
+                           "先平掉一部分仓位 —— 仓位越重，一次波动就够你受的。" % (
+                               acct["equity"], acct["margin"], own, ncap, notional_ratio,
+                               cur_notional, cost)), None
     fee = 0.0 if coupons.use(db, qq, "fee_free", 1) else fee_full
     db.ex("UPDATE users SET cash=cash-? WHERE qq=?", (margin + fee, qq))
     db.ex("INSERT INTO positions(qq,cid,side,qty,entry,leverage,margin,opened_at) VALUES(?,?,?,?,?,?,?,?)",
