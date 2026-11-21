@@ -56,6 +56,7 @@
     <nav class="tabs">
       <button class="tab active" data-tab="market">行情</button>
       <button class="tab" data-tab="positions">交易</button>
+      <button class="tab" data-tab="loan">借贷</button>
       <button class="tab" data-tab="news">资讯</button>
       <button class="tab" data-tab="rank">排行</button>
       <button class="tab" data-tab="me">我的</button>
@@ -247,6 +248,56 @@
     </div>
   </section>
 
+  <section class="pane" id="pane-loan">
+    <div class="list-card loan-hero">
+      <div class="loan-top">
+        <div class="lt-cell"><span class="lt-k">信用分</span><span class="lt-v" id="loanCredit">--</span></div>
+        <div class="lt-cell"><span class="lt-k">我还要还</span><span class="lt-v" id="loanOwe">--</span></div>
+        <div class="lt-cell"><span class="lt-k">别人欠我</span><span class="lt-v" id="loanRec">--</span></div>
+      </div>
+      <div class="loan-warn" id="loanWarn" hidden></div>
+    </div>
+
+    <div class="list-card">
+      <div class="list-title">我要借钱<span class="list-sub">利率由债主定</span></div>
+      <div class="loan-add">
+        <div class="cond-row">
+          <input type="text" id="loanTarget" placeholder="债主昵称 或 QQ 号" autocomplete="off">
+        </div>
+        <div class="cond-row">
+          <input type="number" id="loanAmount" inputmode="decimal" placeholder="金额（元）" step="1" min="1">
+          <select id="loanTerm">
+            <option value="3">3 天</option>
+            <option value="7" selected>7 天</option>
+            <option value="14">14 天</option>
+            <option value="30">30 天</option>
+          </select>
+          <button class="mini-btn primary" id="btnLoanApply" type="button">申请</button>
+        </div>
+        <div class="hint">利率由债主答复时填（单位千分之：0.5 = 万分之五 = 日息 0.05%，0 = 免息互助）。到期自动从账户扣款。</div>
+      </div>
+    </div>
+
+    <div class="list-card">
+      <div class="list-title">待我处理<span class="list-sub">别人找我借钱</span></div>
+      <div class="loan-list" id="loanPendIn"></div>
+    </div>
+
+    <div class="list-card">
+      <div class="list-title">我借入的</div>
+      <div class="loan-list" id="loanBorrows"></div>
+    </div>
+
+    <div class="list-card">
+      <div class="list-title">我借出的</div>
+      <div class="loan-list" id="loanLents"></div>
+    </div>
+
+    <div class="list-card">
+      <div class="list-title">失信名单<span class="list-sub">公开</span></div>
+      <div class="loan-list" id="loanDefaults"></div>
+    </div>
+  </section>
   <section class="pane" id="pane-news">
     <div class="list-card">
       <div class="list-title">财经快讯</div>

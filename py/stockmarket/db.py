@@ -313,6 +313,52 @@ CREATE TABLE IF NOT EXISTS auto_invest(
     last_day TEXT NOT NULL DEFAULT '',
     active INTEGER NOT NULL DEFAULT 1
 );
+
+-- v4.21 个人借贷 P2P。
+-- requests = 借款申请（pending / rejected / accepted / expired）
+-- loans    = 成交的债（open / late / default / repaid / waived）
+-- 【为什么单独两张表，不复用 loans】loans 是银行贷：利率系统定、只有
+-- 还清/减免两种结局。P2P 的利率由债主当场定，还多出失信期、系统垫付、
+-- 债主自己破产打折这些分支。硬塞进同一张表，两套语义会互相污染。
+CREATE TABLE IF NOT EXISTS p2p_requests(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    qq TEXT NOT NULL,
+    lender_qq TEXT NOT NULL,
+    amount REAL NOT NULL,
+    term_days INTEGER NOT NULL,
+    rate REAL NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at INTEGER NOT NULL,
+    decided_at INTEGER,
+    msg TEXT
+);
+
+-- interest / penalty 是累计计提额；interest_paid / penalty_paid / repaid
+-- 是「已经不用再还的部分」（真付掉的 + 破产清算时核销掉的）。
+-- 单独用 writeoff 记下核销了多少，只用于展示。
+CREATE TABLE IF NOT EXISTS p2p_loans(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id INTEGER NOT NULL,
+    lender_qq TEXT NOT NULL,
+    borrower_qq TEXT NOT NULL,
+    amount REAL NOT NULL,
+    rate REAL NOT NULL,
+    term_days INTEGER NOT NULL,
+    interest REAL NOT NULL DEFAULT 0,
+    interest_paid REAL NOT NULL DEFAULT 0,
+    penalty REAL NOT NULL DEFAULT 0,
+    penalty_paid REAL NOT NULL DEFAULT 0,
+    repaid REAL NOT NULL DEFAULT 0,
+    writeoff REAL NOT NULL DEFAULT 0,
+    ts INTEGER NOT NULL,
+    due_at INTEGER NOT NULL,
+    accrued_at INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'open'
+);
+
+CREATE INDEX IF NOT EXISTS idx_p2p_req_lender ON p2p_requests(lender_qq, status);
+CREATE INDEX IF NOT EXISTS idx_p2p_loan_borrower ON p2p_loans(borrower_qq, status);
+CREATE INDEX IF NOT EXISTS idx_p2p_loan_lender ON p2p_loans(lender_qq, status);
 """
 
 REGISTRY_SCHEMA = """
@@ -435,6 +481,17 @@ class GroupDB:
             cols = {r["name"] for r in self.q("PRAGMA table_info(news)")}
             if "cat" not in cols:
                 self.ex("ALTER TABLE news ADD COLUMN cat TEXT NOT NULL DEFAULT ''")
+        except sqlite3.Error:
+            pass
+        # v4.21：个人借贷 P2P。users 补两列：
+        # credit      = 信用分（0~100，低于门槛就不能申请新借款）
+        # p2p_overdue = 失信标记（有违约中的债时置 1）
+        try:
+            cols = {r["name"] for r in self.q("PRAGMA table_info(users)")}
+            for col, decl in (("credit", "INTEGER NOT NULL DEFAULT 60"),
+                              ("p2p_overdue", "INTEGER NOT NULL DEFAULT 0")):
+                if col not in cols:
+                    self.ex("ALTER TABLE users ADD COLUMN %s %s" % (col, decl))
         except sqlite3.Error:
             pass
         # v3.1：锚价（均值回归用）。老库补列并用现价初始化。

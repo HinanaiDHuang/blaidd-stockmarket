@@ -25,3 +25,6 @@ py/stockmarket/__pycache__/
 
 # ---- local helper ----
 _commitmsg.txt
+
+# ---- local scratch ----
+tmp/

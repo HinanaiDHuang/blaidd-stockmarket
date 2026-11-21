@@ -24,6 +24,7 @@ v4.3 之后群里的反馈是「破产之后完全没有游戏体验」——
 非破产玩家的任何收益都不受影响。
 """
 from db import now
+import p2p
 
 # 纾困里程碑（need = 破产期间累计净收入）
 TIERS = [
@@ -167,13 +168,30 @@ def on_bankrupt(db, cfg, qq):
     if user is None:
         return None
     loan = float(user["loan"] or 0)
+    # 【v4.21】P2P 的债单独清算：系统替借款人垫一半给债主，
+    # 剩下那一半不免除，进入失信期靠打工 / 签到慢慢还。
+    # 银行债还是老规矩减免 75% —— P2P 只免一半，比银行狠。
+    # 【为什么必须比银行狠】不然就有一条白嫖路径：
+    # 借 20 万 P2P 不还 -> 破产 -> 司法重整把余债一笔勾销 -> 白拿 20 万。
+    # 债主承担的是真金白银的风险，减免幅度必须小于银行贷。
+    p2p_before = p2p.outstanding(db, qq)
+    bailout, _p2p_left = p2p.on_borrower_bankrupt(db, cfg, qq)
     cut_ratio = float(cfg.get("bankrupt_cut_ratio", 0.75))
     cut = 0.0
-    if loan > 0 and cut_ratio > 0:
-        cut = round(loan * min(1.0, cut_ratio), 2)
-        db.ex("UPDATE users SET loan=loan-? WHERE qq=?", (cut, qq))
+    bank_out = max(0.0, loan - p2p_before)
+    if bank_out > 0 and cut_ratio > 0:
+        cut = round(bank_out * min(1.0, cut_ratio), 2)
         db.ex("UPDATE loans SET status='waived' WHERE qq=? AND status='open'", (qq,))
-        _ledger(db, qq, 0.0, "破产清算：债务减免 %.2f" % cut)
+    # 合计：本金 = 原负债 - 银行减免 - 系统垫付（P2P 那一半）
+    left = max(0.0, loan - cut - bailout)
+    db.ex("UPDATE users SET loan=? WHERE qq=?", (left, qq))
+    total_cut = cut + bailout
+    if total_cut > 0:
+        _ledger(db, qq, 0.0, "破产清算：债务减免 %.2f" % total_cut)
+    # 【v4.21】债主自己破产：他名下的债权按 50% 折算（风险对称）。
+    # 借款人破产时系统替他垫了一半，债主只损失一半；
+    # 债主自己破产，他的债权在自己清算时同样打折，借款人这边也只承担一半。
+    p2p.on_lender_bankrupt(db, cfg, qq)
     # bankrupt_since=「这一次破产的开始时间」，只在第一次写，
     # 重复宣告破产不会刷新它（不然强制清盘的倒计时会被无限重置）。
     db.ex("UPDATE users SET bankrupt_earn=0, relief_tier=0, bankrupt_ts=?, "
@@ -194,9 +212,9 @@ def on_bankrupt(db, cfg, qq):
             mark_reopen(db, cfg, qq, days)
             reopen_txt = ("\n重开期 %d 天：这期间不能贷款、杠杆最多 1 倍，"
                           "先靠打工和签到把本金挣回来。" % days)
-    if cut > 0:
-        return "清算组帮你减免了 %.2f 元债务，剩余欠款 %.2f。%s" % (cut, loan - cut, reopen_txt)
-    return "欠款 %.2f 仍要还。%s" % (loan, reopen_txt)
+    if total_cut > 0:
+        return "清算组帮你减免了 %.2f 元债务，剩余欠款 %.2f。%s" % (total_cut, left, reopen_txt)
+    return "欠款 %.2f 仍要还。%s" % (left, reopen_txt)
 
 
 def earn(db, cfg, qq, amount, note=""):
@@ -228,12 +246,27 @@ def settle(db, cfg, qq):
             _ledger(db, qq, cash, "纾困补助·" + t["name"])
         if tier >= 2:
             # 司法重整：剩余债务一笔勾销 + 恢复交易资格
+            # 【v4.21】P2P 的债不在豁免范围内 —— 银行债可以一笔勾销，
+            # 熟人之间的欠账不行。否则「借 P2P -> 破产 -> 司法重整」就是
+            # 一条白嫖路径：借 20 万不还，凑够 3 万纾困收入就把账清了。
             loan = float(user["loan"] or 0)
-            if loan > 0:
+            p2p_left = min(p2p.outstanding(db, qq), loan)
+            bank_left = max(0.0, loan - p2p_left)
+            if bank_left > 0:
+                db.ex("UPDATE users SET loan=? WHERE qq=?", (p2p_left, qq))
+                db.ex("UPDATE loans SET status='waived' WHERE qq=? AND status='open'", (qq,))
+                _ledger(db, qq, 0.0, "司法重整：免除银行债务 %.2f" % bank_left)
+            elif p2p_left <= 0:
                 db.ex("UPDATE users SET loan=0 WHERE qq=?", (qq,))
                 db.ex("UPDATE loans SET status='waived' WHERE qq=? AND status='open'", (qq,))
-                _ledger(db, qq, 0.0, "司法重整：免除剩余债务 %.2f" % loan)
-            db.ex("UPDATE users SET bankrupt=0 WHERE qq=?", (qq,))
+            # 还有 P2P 债没还清 -> 保持破产标记，继续走失信期慢慢还。
+            # 【为什么不能在这里把 bankrupt 翻成 0】净值还是负的，
+            # check_liquidation 会再次宣告破产、再次触发系统垫付 ——
+            # 债主就能不还钱白拿两遍垫付。
+            if p2p_left > 0:
+                db.ex("UPDATE users SET bankrupt=1 WHERE qq=?", (qq,))
+            else:
+                db.ex("UPDATE users SET bankrupt=0 WHERE qq=?", (qq,))
         db.ex("UPDATE users SET relief_tier=? WHERE qq=?", (tier, qq))
         msgs.append(t["announce"])
     if msgs:

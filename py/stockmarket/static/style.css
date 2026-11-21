@@ -601,3 +601,36 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
 .mem.me .mem-name{color:var(--gold)}
 .transfer-btn{width:100%;margin:2px 0 12px;
   background:linear-gradient(180deg,#e8434f,#c62d3a);border-color:#e8434f;color:#fff}
+
+/* ---------------- 【v4.21】个人借贷 P2P ---------------- */
+.loan-hero{padding:12px 14px}
+.loan-top{display:flex;gap:8px}
+.lt-cell{flex:1;min-width:0;background:rgba(255,255,255,.03);border:1px solid var(--line);
+  border-radius:10px;padding:9px 11px}
+.lt-k{display:block;font-size:11px;color:var(--dim);margin-bottom:3px}
+.lt-v{display:block;font-size:16px;font-weight:700;font-variant-numeric:tabular-nums;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lt-v.ok{color:var(--down)}
+.lt-v.bad{color:#ff8a95}
+.loan-warn{margin-top:10px;padding:9px 11px;border-radius:10px;font-size:12px;line-height:1.65;
+  background:rgba(246,70,93,.12);border:1px solid rgba(246,70,93,.35);color:#ff9aa6}
+.loan-add{padding:0 14px 12px}
+.loan-list{padding:0 14px 12px}
+.loan-item{display:flex;align-items:center;gap:10px;padding:11px 0;border-top:1px solid #1c2128}
+.li-main{flex:1;min-width:0}
+.li-title{display:block;font-size:13.5px;line-height:1.5}
+.li-title b{font-variant-numeric:tabular-nums;color:var(--gold)}
+.li-sub{display:block;font-size:11px;color:var(--dim);margin-top:3px;font-variant-numeric:tabular-nums}
+.li-acts{display:flex;align-items:center;gap:6px;flex-shrink:0}
+.li-rate{width:64px;background:#0d1117;border:1px solid var(--line);color:var(--txt);
+  border-radius:7px;padding:6px 8px;font-size:12px;text-align:center}
+.li-rate:focus{outline:none;border-color:#3b82f6}
+.loan-tag{display:inline-block;margin-left:6px;font-size:10.5px;padding:2px 7px;border-radius:6px;
+  font-weight:600;vertical-align:1px}
+.loan-tag.ok{background:rgba(46,189,133,.16);color:#5fd6a5}
+.loan-tag.warn{background:rgba(217,164,65,.16);color:#e3b969}
+.loan-tag.bad{background:rgba(246,70,93,.16);color:#ff8a95}
+@media (max-width:420px){
+  .loan-item{flex-wrap:wrap}
+  .li-acts{width:100%;justify-content:flex-end}
+}

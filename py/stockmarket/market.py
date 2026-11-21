@@ -4,6 +4,7 @@ import random
 import time
 
 import coupons
+import p2p
 import recovery
 import tiers
 from db import now
@@ -848,6 +849,9 @@ def accrue_interest(db, cfg, qq):
     user = db.q1("SELECT * FROM users WHERE qq=?", (str(qq),))
     if not user or user["loan"] <= 0:
         return
+    # 【v4.21】P2P 的债逐笔按各自利率计提（自己的日息 + 逾期罚息）。
+    # 必须在算银行利息之前调用：P2P 部分要从事后的计息基数里剔掉。
+    p2p.accrue(db, cfg, qq)
     if recovery.in_relief_row(user):
         # 纾困期间债务冻结，不计息（要还的也是翻身之后的事了）
         return
@@ -855,7 +859,12 @@ def accrue_interest(db, cfg, qq):
         return
     rate = cfg["loan_rate_per_day"]
     days = cfg["tick_seconds"] / 86400.0
-    interest = user["loan"] * rate * days
+    # 【v4.21】计息基数要剔掉 P2P 的本金。
+    # P2P 的利率本来就由债主自己定（0.01%~0.3%/天），再叠一层银行日息
+    # （0.05%/天）等于利滚利，玩家的债会莫名其妙涨一大截。
+    p2p_amt = p2p.outstanding(db, qq)
+    base = max(0.0, float(user["loan"] or 0) - p2p_amt)
+    interest = base * rate * days
     if interest <= 0:
         return
     acc = (user["interest_acc"] or 0.0) + interest
@@ -949,8 +958,14 @@ def repay(db, cfg, qq, amount):
     if pay <= 0:
         return False, "你现在没有欠款", None
     db.ex("UPDATE users SET cash=cash-?, loan=MAX(0, loan-?) WHERE qq=?", (pay, pay, qq))
+    # 【v4.21】还款顺序：先还 P2P，再还银行贷款。
+    # 理由：P2P 逾期的罚息是「日息 x3」（最高 0.9%/天），比银行日息贵得多，
+    # 先还最贵的债是标准做法；而且 P2P 是「欠人的钱」，拖着不还最伤信用。
+    # p2p.distribute 会把钱摊到具体每一笔上（罚息 -> 利息 -> 本金），
+    # 同时把本金 / 利息转给债主。
+    p2p_paid, p2p_detail = p2p.distribute(db, cfg, qq, pay, borrower_log=False)
+    left = pay - p2p_paid
     rows = db.q("SELECT * FROM loans WHERE qq=? AND status='open' ORDER BY ts", (qq,))
-    left = pay
     for r in rows:
         if left <= 0:
             break
@@ -961,10 +976,13 @@ def repay(db, cfg, qq, amount):
     _ledger(db, qq, -pay, "还款")
     left = acct["loan"] - pay
     new_acct = account(db, cfg, qq)
+    extra = ""
+    if p2p_detail:
+        extra = "（含个人借贷 %.2f 元）" % p2p_paid
     if user["bankrupt"] and new_acct["equity"] >= 0:
         if recovery.sync_bankrupt(db, cfg, qq, new_acct["equity"]):
-            return True, "还款 %.2f，剩余欠款 %.2f。你的净值已经回正，重获交易资格！" % (pay, left), {"loan": round(left, 2)}
-    return True, "还款 %.2f，剩余欠款 %.2f" % (pay, left), {"loan": round(left, 2)}
+            return True, "还款 %.2f%s，剩余欠款 %.2f。你的净值已经回正，重获交易资格！" % (pay, extra, left), {"loan": round(left, 2)}
+    return True, "还款 %.2f%s，剩余欠款 %.2f" % (pay, extra, left), {"loan": round(left, 2)}
 
 
 # ---------------------------------------------------------------- 打工
@@ -1180,7 +1198,10 @@ def do_job(db, cfg, qq):
     db.ex("UPDATE users SET cash=cash-? WHERE qq=?", (wage, employer["qq"]))
     db.ex("UPDATE users SET cash=cash+?, jobs=jobs+1, last_job=? WHERE qq=?", (wage, now(), qq))
     _ledger(db, qq, wage, "打工工资")
-    relief = recovery.earn(db, cfg, qq, wage)
+    # 【v4.21】失信期：30% 的工资被债主直接拿走还债。
+    # 必须在钱进账之后再扣 —— 扣的是账上的现金，扣完立刻转给债主。
+    garnished, net_income = p2p.garnish(db, cfg, qq, wage)
+    relief = recovery.earn(db, cfg, qq, net_income)
     # 雇主这一笔也得记账，不然群友对不上账（原因别用「打工」开头，
     # 否则会被 job_today_income 当成打工收入统计进去）
     _ledger(db, employer["qq"], -wage, "支付工资给 " + (qq[-4:]))
@@ -1191,6 +1212,9 @@ def do_job(db, cfg, qq):
         line += " 恭喜你净值回正，重获交易资格！"
     tail = " 本次收入 %.2f 元（职级 %s，今日已挣 %.0f/%.0f）。" % (
         wage, level_name, earned + wage, daily_cap)
+    if garnished > 0:
+        tail += (" 你在失信名单里，%d%% 的工资（%.2f 元）被强制拿去还债，实得 %.2f 元。"
+                 % (int(float(cfg.get("p2p_garnish_ratio", 0.3)) * 100), garnished, net_income))
     out = line + event + tail
     for m in relief:
         out += "\n" + m

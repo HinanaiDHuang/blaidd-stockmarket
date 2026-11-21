@@ -38,6 +38,7 @@ import pusher
 import coupons
 import fun
 import orders
+import p2p
 import recovery
 import quick
 import wealth
@@ -118,6 +119,20 @@ TOKEN_TTL = 60 * 60 * 24 * int(CFG.get("token_ttl_days", 7))
 # 每次发版往里加一段（最新的放最前面）。
 # 主人明说不要在群里发公告，那就把变更说清楚放网页上。
 CHANGELOG = [
+    {
+        "ver": "v4.21",
+        "date": "2026-11-22",
+        "title": "个人借贷：群友之间互相借钱，利率由债主定",
+        "items": [
+            "新增【个人借贷】：借款人发【申请借款 5000 @小明 7】，债主收到申请后回【同意借款 小明 0.5】就放款。利率由债主自己定，单位是千分之（0.5 = 万分之五 = 日息 0.05%），0 就是免息互助",
+            "借出人有真实风险：借款人跑不掉 —— 逾期每天罚息（默认日息 ×3），信用分扣 10 分；再不还就进【失信名单】，打工 / 签到收入的 30% 会被强制拿去还债，而且不能再申请新借款",
+            "借款人破产了，系统替你垫一半给债主，剩下一半进失信期慢慢还。债主自己破产的话，这笔债对借款人打 5 折 —— 放贷有风险，借钱也有风险，谁也别想单方面白嫖",
+            "司法重整（破产清盘）只免银行的钱，个人借贷不参与：不然「借 20 万 → 破产 → 重整免光」就成了一条白嫖路线，这条堵死了",
+            "网页上多了一个「借贷」页：信用分、我欠多少、别人欠我多少、待处理申请、我借入的、我借出的、失信名单，还有申请 / 同意 / 拒绝 / 还款按钮 —— 手机上不用再切回群窗口发指令",
+            "堵漏也做了：同一债主只能有一条待处理申请、同一对每天只能成交一笔、单笔最多 20 万、债主单笔最多出现金的 50%、待处理最多 3 条。0 息也照样占债务额度，别想用免息绕过风控",
+            "群指令：申请借款 / 同意借款 / 拒绝借款 / 我的借贷 / 还P2P / 失信榜。@某人 可以直接用 CQ 码或裸 @昵称，认不出来会告诉你有几个同名的人",
+        ],
+    },
     {
         "ver": "v4.20",
         "date": "2026-11-21",
@@ -2162,7 +2177,140 @@ def api_g_transfer():
     return ok({"msg": msg, "info": info, "g": gid}, msg)
 
 
-# ---------------------------------------------------------------- v4.6 财富再分配
+# ---------------------------------------------------------------- v4.21 个人借贷 P2P
+@app.route("/api/g/p2p_apply", methods=["POST"])
+def api_g_p2p_apply():
+    """群里的「申请借款」。"""
+    if not check_admin(request.args.get("admin", "")):
+        return fail("非法请求", 403)
+    j = request.get_json(silent=True) or {}
+    handle, uid, gid, err = _admin_ctx(j.get("u"), j.get("g"), j.get("nick", ""))
+    if err:
+        return err
+    okk, msg, info = p2p.apply_for(handle, CFG, uid, j.get("nick", ""), j.get("amount"),
+                                    j.get("term"), j.get("target_qq"), j.get("target_name"))
+    if not okk:
+        return fail(msg)
+    return ok({"msg": msg, "info": info, "g": gid}, msg)
+
+
+@app.route("/api/g/p2p_decide", methods=["POST"])
+def api_g_p2p_decide():
+    """群里的「同意借款 / 拒绝借款」。利率单位：千分之（0.5 = 万分之五）。"""
+    if not check_admin(request.args.get("admin", "")):
+        return fail("非法请求", 403)
+    j = request.get_json(silent=True) or {}
+    handle, uid, gid, err = _admin_ctx(j.get("u"), j.get("g"), j.get("nick", ""))
+    if err:
+        return err
+    okk, msg, info = p2p.decide(handle, CFG, uid, j.get("nick", ""), j.get("borrower_qq"),
+                                j.get("borrower_name"), j.get("rate"), bool(j.get("accept")))
+    if not okk:
+        return fail(msg)
+    return ok({"msg": msg, "info": info, "g": gid}, msg)
+
+
+@app.route("/api/g/p2p_repay", methods=["POST"])
+def api_g_p2p_repay():
+    """群里的「还P2P」（只还个人借贷，不动银行贷款）。"""
+    if not check_admin(request.args.get("admin", "")):
+        return fail("非法请求", 403)
+    j = request.get_json(silent=True) or {}
+    handle, uid, gid, err = _admin_ctx(j.get("u"), j.get("g"), j.get("nick", ""))
+    if err:
+        return err
+    okk, msg, info = p2p.pay(handle, CFG, uid, j.get("amount"))
+    if not okk:
+        return fail(msg)
+    return ok({"msg": msg, "info": info, "g": gid}, msg)
+
+
+@app.route("/api/g/p2p_info")
+def api_g_p2p_info():
+    """群里的「我的借贷」。"""
+    if not check_admin(request.args.get("admin", "")):
+        return fail("非法请求", 403)
+    uid = request.args.get("u", "")
+    gid = _resolve_gid(request.args.get("g"), uid)
+    if not gid:
+        return fail("还没找到你所在的群")
+    handle = dbmod.get_db(DATA_DIR, gid)
+    return ok({"text": p2p.panel_text(handle, CFG, uid)})
+
+
+@app.route("/api/g/p2p_defaults")
+def api_g_p2p_defaults():
+    """群里的「失信榜」（公开）。"""
+    if not check_admin(request.args.get("admin", "")):
+        return fail("非法请求", 403)
+    gid = _resolve_gid(request.args.get("g"), request.args.get("u", ""))
+    if not gid:
+        return fail("还没找到你所在的群")
+    handle = dbmod.get_db(DATA_DIR, gid)
+    return ok({"text": p2p.default_text(handle, CFG),
+               "list": p2p.default_list(handle, CFG)})
+
+
+@app.route("/api/p2p", methods=["GET"])
+def api_p2p():
+    """网页端借贷面板。"""
+    handle, uid, err = get_ctx(request.args.get("g"), request.args.get("u"),
+                               request.args.get("t"))
+    if err:
+        return err
+    if not _rate_ok("read", int(CFG.get("read_limit_per_min", 240)), ident=uid):
+        return fail("刷新太频繁，稍等一下再试", 429)
+    return ok(p2p.web_panel(handle, CFG, uid))
+
+
+@app.route("/api/p2p/apply", methods=["POST"])
+def api_p2p_apply_web():
+    """网页端：向群友申请借款（利率由债主定）。"""
+    guard = _trade_guard()
+    if guard:
+        return guard
+    j = request.get_json(silent=True) or {}
+    handle, uid, err = get_ctx(j.get("g"), j.get("u"), j.get("t"))
+    if err:
+        return err
+    okk, msg, info = p2p.apply_for(handle, CFG, uid, j.get("nick", ""), j.get("amount"),
+                                    j.get("term"), j.get("target_qq"), j.get("target_name"))
+    if not okk:
+        return fail(msg)
+    return ok({"msg": msg, "info": info})
+
+
+@app.route("/api/p2p/decide", methods=["POST"])
+def api_p2p_decide_web():
+    """网页端：债主答复借款申请（同意要填利率，单位千分之）。"""
+    guard = _trade_guard()
+    if guard:
+        return guard
+    j = request.get_json(silent=True) or {}
+    handle, uid, err = get_ctx(j.get("g"), j.get("u"), j.get("t"))
+    if err:
+        return err
+    okk, msg, info = p2p.decide(handle, CFG, uid, j.get("nick", ""), j.get("borrower_qq"),
+                                j.get("borrower_name"), j.get("rate"), bool(j.get("accept")))
+    if not okk:
+        return fail(msg)
+    return ok({"msg": msg, "info": info})
+
+
+@app.route("/api/p2p/repay", methods=["POST"])
+def api_p2p_repay_web():
+    """网页端：还个人借贷（不动银行贷款）。"""
+    guard = _trade_guard()
+    if guard:
+        return guard
+    j = request.get_json(silent=True) or {}
+    handle, uid, err = get_ctx(j.get("g"), j.get("u"), j.get("t"))
+    if err:
+        return err
+    okk, msg, info = p2p.pay(handle, CFG, uid, j.get("amount"))
+    if not okk:
+        return fail(msg)
+    return ok({"msg": msg, "info": info})
 def _liq_text(st):
     """破产清盘的条件说明（群命令用）。"""
     lines = ["\U0001F9F9 破产清盘（债务重组）"]
@@ -3324,6 +3472,11 @@ def scheduler():
                         if _fund_msg:
                             PUSHER.send_group(gid, _fund_msg)
                         whale.collect_fund(handle, CFG)
+                        # 【v4.21】个人借贷：作废超时未处理的申请 + 播报到期 / 失信
+                        p2p.expire_old(handle, CFG)
+                        _p2p_msg = p2p.daily_report(handle, CFG)
+                        if _p2p_msg:
+                            PUSHER.send_group(gid, _p2p_msg)
                     except Exception as exc:
                         print("[stockmarket] settle_day error:", exc, flush=True)
                 # 【v4.18 每日定投】每天 09:05 之后自动跑一次。

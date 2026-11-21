@@ -131,7 +131,7 @@
     reminders: [], myCo: null, market: null, q: "",
     orders: [], coupons: [], vote: null, voteBoard: [], lottery: null, guess: null,
     recovery: null, tier: null, job: null, onboarding: null, quests: [], rise: [],
-    rob: null, luxury: null, dividend: null, wealth: null,
+    rob: null, luxury: null, dividend: null, wealth: null, loan: null,
     fund: null, fundBet: null, fundBoard: [], fundBets: [],
     openPanel: null, loaded: {}, msg: {}, changelog: null,
     trQuota: null, members: [],
@@ -1109,6 +1109,7 @@
     renderOnboard();
     renderQuest();
     renderJob();
+    renderLoan();
     syncSabotageBtn();
     $("btnPeek").textContent = "🔮 买内幕消息（" + (S.cfg.peek_cost || 800) + " 元）";
   }
@@ -2163,6 +2164,187 @@
     });
   }
 
+  /* ---------------------------------------------------------- 【v4.21】个人借贷 P2P
+     群里互相借钱：债主定利率，借款人到期自动扣款；逾期罚息 + 扣信用分，
+     失信期打工/签到收入的 30% 强制还债。网页端和群指令共用同一套后端。 */
+  function loanStatusTag(st) {
+    if (st === "default") return '<span class="loan-tag bad">违约</span>';
+    if (st === "late") return '<span class="loan-tag warn">逾期</span>';
+    return '<span class="loan-tag ok">正常</span>';
+  }
+
+  function renderLoan() {
+    var d = S.loan;
+    var credit = $("loanCredit"), owe = $("loanOwe"), rec = $("loanRec");
+    var warn = $("loanWarn");
+    if (!d) {
+      if (credit) credit.textContent = "--";
+      if (owe) owe.textContent = "--";
+      if (rec) rec.textContent = "--";
+      return;
+    }
+    if (credit) {
+      credit.textContent = fmtInt(d.credit);
+      credit.className = "lt-v " + (Number(d.credit) < Number(d.credit_min) ? "bad" : "ok");
+    }
+    if (owe) owe.textContent = fmtInt(d.owe) + " 元";
+    if (rec) rec.textContent = fmtInt(d.receivable) + " 元";
+    if (warn) {
+      if (d.in_default) {
+        warn.hidden = false;
+        warn.innerHTML = "🚨 你在【失信名单】里：打工 / 签到收入的 " +
+          Math.round(Number(d.garnish || 0.3) * 100) + "% 会被强制拿去还债，且不能申请新借款。";
+      } else {
+        warn.hidden = true;
+        warn.textContent = "";
+      }
+    }
+    /* 待我处理 */
+    var pin = $("loanPendIn");
+    if (pin) {
+      var h = "";
+      var pend = d.pending_in || [];
+      for (var i = 0; i < pend.length; i++) {
+        var p = pend[i];
+        h += '<div class="loan-item">'
+          + '<div class="li-main"><span class="li-title">' + esc(p.nick || p.qq) + " 想借你 </span>"
+          + '<b>' + fmtInt(p.amount) + "</b> 元"
+          + '<span class="li-sub">' + p.term + " 天期 · QQ " + esc(p.qq) + "</span></div>"
+          + '<div class="li-acts">'
+          + '<input type="number" step="0.1" min="0" class="li-rate" placeholder="利率‰" id="lr' + p.id + '">'
+          + '<button class="mini-btn primary" data-loan-ok="' + p.id + '">同意</button>'
+          + '<button class="mini-btn danger" data-loan-no="' + p.id + '">拒绝</button>'
+          + "</div></div>";
+      }
+      if (!pend.length) h = '<div class="empty">暂时没人找你借钱</div>';
+      pin.innerHTML = h;
+    }
+    /* 我借入的 */
+    var bor = $("loanBorrows");
+    if (bor) {
+      var h = "";
+      var bs = d.borrows || [];
+      for (var i = 0; i < bs.length; i++) {
+        var b = bs[i];
+        h += '<div class="loan-item">'
+          + '<div class="li-main"><span class="li-title">欠 ' + esc(b.lender_nick || b.lender) + " </span>"
+          + '<b>' + fmtInt(b.amount) + "</b> 元 " + loanStatusTag(b.status)
+          + '<span class="li-sub">' + esc(b.rate_text) + " · " + b.term + " 天期 · "
+          + (Number(b.days_left) > 0 ? "还剩 " + b.days_left + " 天" : "已到期") + "</span>"
+          + '<span class="li-sub">还欠 ' + fmtInt(b.left) + " 元"
+          + (Number(b.penalty) > 0 ? "（含罚息 " + fmtInt(b.penalty) + "）" : "") + "</span></div>"
+          + '<div class="li-acts"><button class="mini-btn" data-loan-repay="'
+          + esc(b.lender) + '">还款</button></div></div>';
+      }
+      if (!bs.length) h = '<div class="empty">你没有欠别人的个人借贷</div>';
+      bor.innerHTML = h;
+    }
+    /* 我借出的 */
+    var lent = $("loanLents");
+    if (lent) {
+      var h = "";
+      var ls = d.lents || [];
+      for (var i = 0; i < ls.length; i++) {
+        var l = ls[i];
+        h += '<div class="loan-item">'
+          + '<div class="li-main"><span class="li-title">' + esc(l.borrower_nick || l.borrower) + " 借走 </span>"
+          + '<b>' + fmtInt(l.amount) + "</b> 元 " + loanStatusTag(l.status)
+          + '<span class="li-sub">' + esc(l.rate_text) + " · " + l.term + " 天期 · "
+          + (Number(l.days_left) > 0 ? "还剩 " + l.days_left + " 天" : "已到期") + "</span>"
+          + '<span class="li-sub">没收回来 ' + fmtInt(l.left) + " 元</span></div></div>";
+      }
+      if (!ls.length) h = '<div class="empty">你还没借出过钱</div>';
+      lent.innerHTML = h;
+    }
+    /* 失信名单 */
+    var df = $("loanDefaults");
+    if (df) {
+      var h = "";
+      var ds = d.defaults || [];
+      for (var i = 0; i < ds.length; i++) {
+        var x = ds[i];
+        h += '<div class="loan-item"><div class="li-main">'
+          + '<span class="li-title">' + esc(x.nick || x.qq) + "</span>"
+          + '<span class="li-sub">' + x.count + " 笔违约 · 欠 " + fmtInt(x.amount) + " 元</span>"
+          + "</div></div>";
+      }
+      if (!ds.length) h = '<div class="empty">目前一个人都没有，大家都很守约 👍</div>';
+      df.innerHTML = h;
+    }
+  }
+
+  function loadLoan() {
+    get("/api/p2p").then(function (d) {
+      S.loan = d;
+      renderLoan();
+    }).catch(function (e) {
+      var box = $("loanPendIn");
+      if (box) box.innerHTML = '<div class="empty">' + esc(friendlyErr(e)) + "</div>";
+    });
+  }
+
+  function doLoanApply() {
+    var t = ($("loanTarget").value || "").trim();
+    if (!t) { toast("先写上要向谁借"); return; }
+    var amt = Number($("loanAmount").value);
+    if (!amt || amt <= 0) { toast("先填个金额"); return; }
+    var term = Number($("loanTerm").value) || 7;
+    /* 昵称 / QQ 号都试：先当 QQ 号，失败再当昵称 */
+    var isQQ = /^\d{5,}$/.test(t);
+    var body = { amount: amt, term: term };
+    if (isQQ) body.target_qq = t; else body.target_name = t;
+    var btn = $("btnLoanApply");
+    if (btn) btn.disabled = true;
+    post("/api/p2p/apply", body).then(function (d) {
+      toast(d.msg || "申请已发出");
+      $("loanTarget").value = "";
+      $("loanAmount").value = "";
+      return loadLoan();
+    }).catch(function (e) {
+      toast(friendlyErr(e));
+    }).then(function () { if (btn) btn.disabled = false; });
+  }
+
+  function doLoanDecide(id, accept) {
+    var body = { accept: accept, rate: 0 };
+    if (accept) {
+      var el = $("lr" + id);
+      var v = el ? Number(el.value) : NaN;
+      if (!v || v < 0) { toast("填个利率（千分之，0 = 免息）"); return; }
+      body.rate = v;
+      var p = (S.loan && S.loan.pending_in) || [];
+      for (var i = 0; i < p.length; i++) {
+        if (String(p[i].id) === String(id)) { body.borrower_qq = p[i].qq; break; }
+      }
+    } else {
+      var p2 = (S.loan && S.loan.pending_in) || [];
+      for (var i = 0; i < p2.length; i++) {
+        if (String(p2[i].id) === String(id)) { body.borrower_qq = p2[i].qq; break; }
+      }
+    }
+    post("/api/p2p/decide", body).then(function (d) {
+      toast(d.msg || "已处理");
+      return loadLoan();
+    }).catch(function (e) { toast(friendlyErr(e)); });
+  }
+
+  function doLoanRepay(lender) {
+    var v = window.prompt("还多少？（留空 = 一次还清）", "");
+    if (v === null) return;
+    v = String(v).trim();
+    var amt = 0;
+    if (v !== "") {
+      amt = Number(v);
+      if (!amt || amt <= 0) { toast("金额不对"); return; }
+    } else {
+      amt = Number((S.loan && S.loan.owe) || 0);
+      if (!amt || amt <= 0) { toast("你没有要还的个人借贷"); return; }
+    }
+    post("/api/p2p/repay", { amount: amt }).then(function (d) {
+      toast(d.msg || "已还款");
+      return Promise.all([refreshState(), loadLoan()]);
+    }).catch(function (e) { toast(friendlyErr(e)); });
+  }
   /* ---------------------------------------------------------- 财阀基金（v4.13）
      富豪的钱往哪儿去：富豪按净值比例自动出资、3 倍杠杆押全市场，
      群友可以押方向。网页这边跟群里是同一套后端。 */
@@ -2549,10 +2731,27 @@
        画布在隐藏时量不到尺寸（见 resizeCanvas 里的坑），
        切回来得重新量一次再画，不然会空着好几秒。 */
     if (name === "market") { resizeCanvas(); draw(); }
+    if (name === "loan") { loadLoan(); }
     window.scrollTo(0, 0);
   }
   document.querySelectorAll(".tab").forEach(function (btn) {
     btn.addEventListener("click", function () { showTab(btn.getAttribute("data-tab")); });
+  });
+
+  /* 【v4.21】借贷面板的事件绑定：列表是重绘出来的，所以用事件委托 */
+  var btnLoanApply = $("btnLoanApply");
+  if (btnLoanApply) {
+    btnLoanApply.addEventListener("click", function () { doLoanApply(); });
+  }
+  document.addEventListener("click", function (ev) {
+    var t = ev.target;
+    if (!t || !t.getAttribute) return;
+    var okId = t.getAttribute("data-loan-ok");
+    if (okId) { doLoanDecide(okId, true); return; }
+    var noId = t.getAttribute("data-loan-no");
+    if (noId) { doLoanDecide(noId, false); return; }
+    var rp = t.getAttribute("data-loan-repay");
+    if (rp) { doLoanRepay(rp); return; }
   });
 
   document.querySelectorAll(".seg-btn").forEach(function (btn) {

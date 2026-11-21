@@ -11,6 +11,7 @@ import random
 import time
 
 import market
+import p2p
 import recovery
 import tiers
 import tycoon
@@ -81,9 +82,14 @@ def do_checkin(db, cfg, qq):
           (qq, streak, best, total, day))
     db.ex("UPDATE users SET cash=cash+? WHERE qq=?", (reward, qq))
     _ledger(db, qq, reward, "每日签到")
-    relief = recovery.earn(db, cfg, qq, reward)
+    # 【v4.21】失信期：30% 的签到金被债主直接拿走还债。
+    garnished, net_income = p2p.garnish(db, cfg, qq, reward)
+    relief = recovery.earn(db, cfg, qq, net_income)
     ach = check_achievements(db, cfg, qq)
     msg = random.choice(CHECKIN_LINES) + " 签到获得 %.2f 元，当前连签 %d 天。" % (reward, streak)
+    if garnished > 0:
+        msg += (" 你在失信名单里，%d%% 的签到金（%.2f 元）被强制拿去还债，实得 %.2f 元。"
+                % (int(float(cfg.get("p2p_garnish_ratio", 0.3)) * 100), garnished, net_income))
     if bonus:
         msg = (GRAND_TEXT.format(days=streak) + " 奖金 %.2f 元！" % reward) + \
               " 连签 %d 天，明天别断。" % streak
@@ -136,6 +142,15 @@ ACH_DEFS = [
     ("repaid", "诚信还款", 900.0, "还清过全部欠款"),
     ("bigdebt", "负债累累", 700.0, "欠款一度超过 10 万"),
     ("debtfree", "债务重整", 2200.0, "通过司法重整一笔勾销欠款"),
+    # —— v4.21 个人借贷 P2P ——
+    ("p2p_lend1", "第一笔人情债", 300.0, "第一次把钱借给群友"),
+    ("p2p_lend10", "债主之王", 1800.0, "借出过 10 笔"),
+    ("p2p_borrow1", "开口不易", 200.0, "第一次向群友开口借钱"),
+    ("p2p_paid", "守约还款", 800.0, "还清过一笔个人借贷"),
+    ("p2p_free", "人间真情", 500.0, "免息放款过一次"),
+    ("p2p_interest", "债主开门红", 600.0, "收回过个人借贷的利息"),
+    ("p2p_baddebt", "老赖克星", 400.0, "遇到过一次违约"),
+    ("p2p_credit100", "信用满格", 2000.0, "信用分打满 100"),
     # —— 条件单 ——
     ("cond_place", "纪律执行者", 400.0, "挂过条件单"),
     ("cond_hit", "自动化交易", 1000.0, "条件单触发过"),
@@ -260,6 +275,30 @@ def check_achievements(db, cfg, qq):
         hits.add("debtfree")
     if relief_tier >= 1 and float(user["loan"] or 0) <= 0:
         hits.add("comeback")
+    # —— v4.21 个人借贷 P2P ——
+    # 【为什么不跟上面那几条「借贷」成就合并计数】银行贷是系统给的，
+    # 想借多少借多少，没有「人情」成分；P2P 得有人愿意借给你，
+    # 是完全不同的行为，混在一起成就就失去意义了。
+    if _count(db, "SELECT COUNT(*) c FROM p2p_loans WHERE lender_qq=?", (qq,)) >= 1:
+        hits.add("p2p_lend1")
+    if _count(db, "SELECT COUNT(*) c FROM p2p_loans WHERE lender_qq=?", (qq,)) >= 10:
+        hits.add("p2p_lend10")
+    if _count(db, "SELECT COUNT(*) c FROM p2p_loans WHERE borrower_qq=?", (qq,)) >= 1:
+        hits.add("p2p_borrow1")
+    q = "SELECT COUNT(*) c FROM p2p_loans WHERE borrower_qq=? AND status='repaid'"
+    if _count(db, q, (qq,)) >= 1:
+        hits.add("p2p_paid")
+    q = "SELECT COUNT(*) c FROM p2p_loans WHERE lender_qq=? AND rate=0"
+    if _count(db, q, (qq,)) >= 1:
+        hits.add("p2p_free")
+    q = "SELECT COUNT(*) c FROM ledger WHERE qq=? AND reason LIKE 'P2P收款%'"
+    if _count(db, q, (qq,)) >= 1:
+        hits.add("p2p_interest")
+    q = "SELECT COUNT(*) c FROM p2p_loans WHERE lender_qq=? AND status='default'"
+    if _count(db, q, (qq,)) >= 1:
+        hits.add("p2p_baddebt")
+    if p2p.credit_of(db, qq) >= 100:
+        hits.add("p2p_credit100")
     # —— 条件单 ——
     if _count(db, "SELECT COUNT(*) c FROM orders WHERE qq=?", (qq,)) >= 1:
         hits.add("cond_place")

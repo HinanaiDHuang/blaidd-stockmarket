@@ -1358,6 +1358,207 @@ function stock_fund(msg)
     return (j.data and j.data.text) or ""
 end
 
+-- ------------------------------------------------------------ v4.21 个人借贷 P2P
+-- 群里互相借钱：借出人定利率，借款人到期自动扣款；逾期罚息 + 扣信用分，
+-- 失信期打工/签到收入的 30% 强制还债，破产由系统垫付一半。
+
+local function p2p_escape(s)
+    return (s or ""):gsub("([%-%+%(%)%%%.%[%]%*%+%?%^%$])", "%%%1")
+end
+
+-- 群里按昵称找 QQ：群昵称优先，其次 QQ 昵称
+local function p2p_find_qq(group, name)
+    if group == nil or group == "" or name == nil or name == "" then return nil end
+    local members = getGroupConf(group, "members") or {}
+    if type(members) ~= "table" then return nil end
+    local fallback = nil
+    for _, mqq in ipairs(members) do
+        mqq = tostring(mqq)
+        local gn = getUserConf(mqq, "nick#" .. group)
+        if gn and gn == name then return mqq end
+        local nn = getUserConf(mqq, "nick")
+        if nn and nn == name and fallback == nil then fallback = mqq end
+    end
+    return fallback
+end
+
+-- 摘出 @ 对象。返回 (qq, name, rest)
+-- 兼容 [CQ:at,qq=123] / [CQ:at,id=123] / [CQ:at,qq=-1,text=@昵称] / 裸 @昵称
+local function p2p_pick_at(text, group)
+    local t = text or ""
+    local cq = string.match(t, "%[CQ:at,[qi]%w?=(%d+)%]")
+    if cq and cq ~= "-1" then
+        local rest = string.gsub(t, "%[CQ:at,[qi]%w?=(%d+)%]", " ")
+        return cq, "", rest
+    end
+    local cqn = string.match(t, "%[CQ:at,[qi]%w?=-1,text=%s*@?([^%]]+)%]")
+    if cqn then
+        local rest = string.gsub(t, "%[CQ:at,[qi]%w?=-1,text=%s*@?([^%]]+)%]", " ")
+        return (p2p_find_qq(group, cqn) or ""), cqn, rest
+    end
+    local tok = string.match(t, "@([^%s,，]+)")
+    if tok and tok ~= "" then
+        local rest = string.gsub(t, "@" .. p2p_escape(tok), " ", 1)
+        if string.match(tok, "^%d+$") then
+            return tok, "", rest
+        end
+        return (p2p_find_qq(group, tok) or ""), tok, rest
+    end
+    return "", "", t
+end
+
+-- 金额解析：5000 / 1.5万 / 20w / 3k
+local function p2p_money(s)
+    if s == nil then return nil end
+    s = tostring(s):gsub("[,，%s]", "")
+    s = s:gsub("[元块天日钱]", "")
+    local mult = 1
+    local n = s:match("^(%-?%d+%.?%d*)万$") or s:match("^(%-?%d+%.?%d*)w$")
+    if n then
+        mult = 10000
+        s = n
+    else
+        n = s:match("^(%-?%d+%.?%d*)k$") or s:match("^(%-?%d+%.?%d*)K$")
+        if n then
+            mult = 1000
+            s = n
+        end
+    end
+    local v = tonumber(s)
+    if not v then return nil end
+    return v * mult
+end
+
+local function p2p_tokens(text)
+    local out = {}
+    for tok in string.gmatch(text or "", "[^%s]+") do
+        out[#out + 1] = tok
+    end
+    return out
+end
+
+-- 【申请借款 金额 @某某 天数】
+function stock_p2p_apply(msg)
+    local qq, nick = cur_qq_nick(msg)
+    local rest = string.match(msg.fromMsg or "", "^%s*[^%s]+%s+(.+)$") or ""
+    rest = rest:gsub("^%s+", ""):gsub("%s+$", "")
+    if rest == "" then
+        return "用法：【申请借款 金额 @某某 天数】\n（利率由对方定；0 表示免息互助；天数不填默认 7 天）"
+    end
+    local target_qq, target_name, body = p2p_pick_at(rest, msg.fromGroup)
+    if target_qq == "" and target_name == "" then
+        return "要向谁借？用法：【申请借款 5000 @某某 7】"
+    end
+    local toks = p2p_tokens(body)
+    local amount, term = nil, nil
+    for _, tok in ipairs(toks) do
+        local v = p2p_money(tok)
+        if v then
+            if amount == nil then
+                amount = v
+            elseif term == nil then
+                term = v
+            end
+        end
+    end
+    if amount == nil then
+        return "没看懂要借多少钱。\n用法：【申请借款 5000 @某某 7】"
+    end
+    local j = api_post("/api/g/p2p_apply", {
+        g = cur_gid(msg), u = qq, nick = nick,
+        amount = amount, term = term or 0,
+        target_qq = target_qq, target_name = target_name })
+    if not j then return "炒股服务没响应" end
+    if j.code ~= 200 then return "申请失败：" .. (j.message or "") end
+    return j.data.msg
+end
+
+-- 【同意借款 某某 利率】 / 【拒绝借款 某某】
+function stock_p2p_decide(msg)
+    local qq, nick = cur_qq_nick(msg)
+    local raw = msg.fromMsg or ""
+    local head = string.match(raw, "^%s*([^%s]+)") or ""
+    local accept = true
+    if head == "拒绝借款" or head == "拒绝放款" or head == "驳回借款" then
+        accept = false
+    end
+    local rest = string.match(raw, "^%s*[^%s]+%s+(.+)$") or ""
+    rest = rest:gsub("^%s+", ""):gsub("%s+$", "")
+    if rest == "" then
+        if accept then
+            return "用法：【同意借款 某某 利率】\n利率单位是千分之 —— 0.5 = 万分之五 = 日息 0.05%；0 表示免息互助"
+        end
+        return "用法：【拒绝借款 某某】"
+    end
+    local borrower_qq, borrower_name, body = p2p_pick_at(rest, msg.fromGroup)
+    local toks = p2p_tokens(body)
+    local rate = nil
+    if accept and #toks > 0 then
+        local last = toks[#toks]:gsub("‰", "")
+        local v = tonumber(last)
+        if v then
+            rate = v
+            table.remove(toks, #toks)
+        end
+    end
+    if borrower_qq == "" and borrower_name == "" then
+        local first = toks[1]
+        if first then
+            if string.match(first, "^%d+$") and #first >= 6 then
+                borrower_qq = first
+            else
+                borrower_name = first
+            end
+            table.remove(toks, 1)
+        end
+    end
+    if borrower_qq == "" and borrower_name == "" then
+        return "没说要答复谁。\n用法：【同意借款 某某 利率】"
+    end
+    if accept and rate == nil then
+        return "还没填利率。\n（单位是千分之：0.5 = 万分之五 = 日息 0.05%；0 表示免息互助）"
+    end
+    local j = api_post("/api/g/p2p_decide", {
+        g = cur_gid(msg), u = qq, nick = nick,
+        borrower_qq = borrower_qq, borrower_name = borrower_name,
+        rate = rate or 0, accept = accept })
+    if not j then return "炒股服务没响应" end
+    if j.code ~= 200 then return (accept and "放款失败：" or "操作失败：") .. (j.message or "") end
+    return j.data.msg
+end
+
+-- 【我的借贷】
+function stock_p2p_info(msg)
+    local qq = cur_qq_nick(msg)
+    local j = api_get(string.format("/api/g/p2p_info?g=%s&u=%s", cur_gid(msg), qq))
+    if not j then return "炒股服务没响应" end
+    if j.code ~= 200 then return "查询失败：" .. (j.message or "") end
+    return (j.data and j.data.text) or "没有查到你的借贷记录"
+end
+
+-- 【还P2P 金额】
+function stock_p2p_repay(msg)
+    local qq, nick = cur_qq_nick(msg)
+    local rest = string.match(msg.fromMsg or "", "^%s*[^%s]+%s+(.+)$") or ""
+    rest = rest:gsub("^%s+", ""):gsub("%s+$", "")
+    local amount = p2p_money(rest)
+    if not amount then
+        return "用法：【还P2P 金额】\n（只还个人借贷，银行贷款请用【还款】）"
+    end
+    local j = api_post("/api/g/p2p_repay", { g = cur_gid(msg), u = qq, nick = nick, amount = amount })
+    if not j then return "炒股服务没响应" end
+    if j.code ~= 200 then return "还款失败：" .. (j.message or "") end
+    return j.data.msg
+end
+
+-- 【失信榜】
+function stock_p2p_defaults(msg)
+    local qq = cur_qq_nick(msg)
+    local j = api_get(string.format("/api/g/p2p_defaults?g=%s&u=%s", cur_gid(msg), qq))
+    if not j then return "炒股服务没响应" end
+    if j.code ~= 200 then return "查询失败：" .. (j.message or "") end
+    return (j.data and j.data.text) or "暂无失信记录"
+end
 msg_order["炒股"] = "chaogu"
 msg_order["重置口令"] = "reset_passcode"
 msg_order["重置登录口令"] = "reset_passcode"
@@ -1487,3 +1688,19 @@ msg_order["押跌"] = "stock_fund"
 msg_order["看涨"] = "stock_fund"
 msg_order["看跌"] = "stock_fund"
 msg_order["挑战首富"] = "stock_fund"
+-- v4.21 个人借贷 P2P
+msg_order["申请借款"] = "stock_p2p_apply"
+msg_order["借一笔"] = "stock_p2p_apply"
+msg_order["求借款"] = "stock_p2p_apply"
+msg_order["同意借款"] = "stock_p2p_decide"
+msg_order["放款"] = "stock_p2p_decide"
+msg_order["拒绝借款"] = "stock_p2p_decide"
+msg_order["驳回借款"] = "stock_p2p_decide"
+msg_order["我的借贷"] = "stock_p2p_info"
+msg_order["我的账单"] = "stock_p2p_info"
+msg_order["借贷"] = "stock_p2p_info"
+msg_order["还P2P"] = "stock_p2p_repay"
+msg_order["还私贷"] = "stock_p2p_repay"
+msg_order["还个人借贷"] = "stock_p2p_repay"
+msg_order["失信榜"] = "stock_p2p_defaults"
+msg_order["老赖榜"] = "stock_p2p_defaults"
